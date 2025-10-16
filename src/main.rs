@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{Code, HotKey, Modifiers}};
 use nix::unistd::{getgid, getuid, setgid, setuid, Gid, Uid};
+use parking_lot::Mutex;
 use std::env;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -10,6 +13,7 @@ use tracing::{debug, error, info};
 mod audio_input;
 mod input_event;
 mod stt_client;
+mod tray_icon;
 mod virtual_keyboard;
 
 use audio_input::AudioInput;
@@ -268,19 +272,30 @@ async fn debug_stt(stt_url: &str) -> Result<()> {
     .await
 }
 
+enum AudioCommand {
+    Start,
+    Stop,
+}
+
 async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static,
 {
-    let mut audio_input = AudioInput::new()?;
+    // Initialize GTK for tray icon
+    gtk::init().context("Failed to initialize GTK")?;
+    
+    // Create audio input temporarily just to get parameters
+    let temp_audio = AudioInput::new()?;
+    let sample_rate = temp_audio.get_sample_rate();
+    let channels = temp_audio.get_channels();
     debug!(
         "Using audio device with {} channels at {} Hz",
-        audio_input.get_channels(),
-        audio_input.get_sample_rate()
+        channels,
+        sample_rate
     );
+    drop(temp_audio);
 
-    let mut audio_buffer = AudioBuffer::new(audio_input.get_sample_rate(), 160);
-    let stt_client = SttClient::new(stt_url, audio_input.get_sample_rate());
+    let stt_client = SttClient::new(stt_url, sample_rate);
 
     info!(?stt_url, "Connecting to STT service...");
     let (audio_tx, handle) = stt_client
@@ -288,41 +303,144 @@ where
         .await
         .context("Failed to connect to STT service")?;
 
-    info!("Listening for speech... Speak into your microphone!");
-    info!("Press Ctrl+C to stop.");
+    info!("Voice Keyboard is ready!");
+    info!("Press Super+X to toggle listening, or use the tray icon.");
+    info!("Press Ctrl+C to quit.");
 
     let audio_tx = std::sync::Arc::new(audio_tx);
-    let audio_tx_clone = audio_tx.clone();
-    let channels = audio_input.get_channels();
 
-    // Start recording
-    audio_input.start_recording(move |data| {
-        debug!("Received audio data: {} samples", data.len());
+    // Shared state for STT active/inactive
+    let is_active = Arc::new(Mutex::new(false));
+    
+    // Set up system tray (must stay on this thread)
+    let mut tray_manager = tray_icon::TrayManager::new(is_active.clone())
+        .context("Failed to create system tray icon")?;
 
-        // Average stereo channels to mono
-        let mono_data: Vec<f32> = if channels == 2 {
-            let mut mono = Vec::with_capacity(data.len() / 2);
-            for chunk in data.chunks_exact(2) {
-                mono.push((chunk[0] + chunk[1]) / 2.0);
+    // Set up global hotkey (Super+X)
+    let hotkey_manager = GlobalHotKeyManager::new()
+        .context("Failed to initialize global hotkey manager")?;
+    
+    let super_x = HotKey::new(Some(Modifiers::SUPER), Code::KeyX);
+    hotkey_manager.register(super_x)
+        .context("Failed to register Super+X hotkey")?;
+    
+    info!("Registered global hotkey: Super+X");
+
+    // Use channels to communicate toggle commands to audio thread
+    let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
+    
+    // Spawn dedicated audio thread (create AudioInput inside the thread)
+    thread::spawn(move || {
+        // Create audio input on this thread
+        let mut audio_input = match AudioInput::new() {
+            Ok(ai) => ai,
+            Err(e) => {
+                error!("Failed to create audio input: {}", e);
+                return;
             }
-            debug!("Averaged samples: {}", mono.len());
-            mono
-        } else {
-            data.to_vec()
         };
+        
+        let audio_buffer = AudioBuffer::new(sample_rate, 160);
+        
+        for command in cmd_rx {
+            match command {
+                AudioCommand::Start => {
+                    // Start recording
+                    info!("Starting audio recording...");
+                    let audio_tx_clone = audio_tx.clone();
+                    let audio_buffer_clone = Arc::new(Mutex::new(audio_buffer.clone()));
+                    
+                    if let Err(e) = audio_input.start_recording(move |data| {
+                        debug!("Received audio data: {} samples", data.len());
 
-        // Create audio chunks and send them
-        let chunks = audio_buffer.add_samples(&mono_data);
-        for chunk in chunks {
-            debug!("Sending audio chunk: {} bytes", chunk.len());
-            if let Err(e) = audio_tx_clone.blocking_send(chunk) {
-                error!("Failed to send audio chunk: {}", e);
+                        // Average stereo channels to mono
+                        let mono_data: Vec<f32> = if channels == 2 {
+                            let mut mono = Vec::with_capacity(data.len() / 2);
+                            for chunk in data.chunks_exact(2) {
+                                mono.push((chunk[0] + chunk[1]) / 2.0);
+                            }
+                            debug!("Averaged samples: {}", mono.len());
+                            mono
+                        } else {
+                            data.to_vec()
+                        };
+
+                        // Create audio chunks and send them
+                        let mut buffer = audio_buffer_clone.lock();
+                        let chunks = buffer.add_samples(&mono_data);
+                        for chunk in chunks {
+                            debug!("Sending audio chunk: {} bytes", chunk.len());
+                            if let Err(e) = audio_tx_clone.blocking_send(chunk) {
+                                error!("Failed to send audio chunk: {}", e);
+                            }
+                        }
+                    }) {
+                        error!("Failed to start recording: {}", e);
+                    }
+                }
+                AudioCommand::Stop => {
+                    // Stop recording
+                    info!("Stopping audio recording...");
+                    audio_input.stop_recording();
+                }
             }
         }
-    })?;
+    });
 
-    // Just wait for the STT client to finish (will be interrupted by Ctrl+C)
-    handle.await??;
+    // Event loop on main thread for hotkey and tray events
+    let handle_clone = tokio::spawn(async move {
+        handle.await
+    });
+    
+    loop {
+        // Process GTK events (required for tray icon to work)
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        
+        // Check for hotkey events
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.id == super_x.id() {
+                let mut active = is_active.lock();
+                *active = !*active;
+                let new_state = *active;
+                drop(active);
+
+                info!("Hotkey toggle: {}", if new_state { "active" } else { "inactive" });
+                
+                if let Err(e) = tray_manager.update_icon(new_state) {
+                    error!("Failed to update tray icon: {}", e);
+                }
+                
+                // Send command to audio thread
+                let cmd = if new_state { AudioCommand::Start } else { AudioCommand::Stop };
+                let _ = cmd_tx.send(cmd);
+            }
+        }
+
+        // Check for tray menu events
+        if let Ok(state_changed) = tray_manager.handle_events() {
+            if state_changed {
+                let new_state = *is_active.lock();
+                
+                info!("Tray toggle: {}", if new_state { "active" } else { "inactive" });
+                
+                // Send command to audio thread
+                let cmd = if new_state { AudioCommand::Start } else { AudioCommand::Stop };
+                let _ = cmd_tx.send(cmd);
+            }
+        }
+
+        // Check if STT handle is done
+        if handle_clone.is_finished() {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Wait for the STT client to finish
+    handle_clone.await???;
 
     Ok(())
 }

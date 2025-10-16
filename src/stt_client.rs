@@ -294,6 +294,7 @@ impl SttClient {
     }
 }
 
+#[derive(Clone)]
 pub struct AudioBuffer {
     buffer: Vec<u8>,
     chunk_size: usize,

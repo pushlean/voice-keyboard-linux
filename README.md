@@ -11,6 +11,8 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 - **Voice-to-Text**: Real-time speech recognition using Deepgram's **Flux** API service (turn-taking STT)
 - **Virtual Keyboard**: Creates a virtual input device that works with all applications
 - **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections
+- **Toggle Control**: Enable/disable listening with Super+X keyboard shortcut or system tray icon
+- **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
 
 ## Architecture
 
@@ -29,10 +31,10 @@ The application solves a common Linux privilege problem:
 curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh
 
 # Install required system packages (Fedora/RHEL)
-sudo dnf install alsa-lib-devel
+sudo dnf install alsa-lib-devel gtk3-devel libxdo-devel
 
 # Install required system packages (Ubuntu/Debian)
-sudo apt install libasound2-dev
+sudo apt install libasound2-dev libgtk-3-dev libxdo-dev pkg-config
 ```
 
 ### Build
@@ -75,6 +77,19 @@ sudo -E ./target/debug/voice-keyboard --test-stt
 ```
 
 **Important**: Always use `sudo -E` to preserve environment variables needed for audio access.
+
+### Toggle Control
+
+The application starts in **inactive** mode (not listening). You can toggle listening on/off using:
+
+- **Keyboard Shortcut**: Press `Super+X` (Windows/Command key + X)
+- **System Tray Icon**: 
+  - Click the tray icon menu and select "Toggle STT"
+  - Green icon = actively listening
+  - Red icon = inactive (not listening)
+  - Right-click the icon to access the menu
+
+When inactive, audio recording is completely stopped to conserve system resources.
 
 ## Speech-to-Text Service
 
@@ -158,6 +173,15 @@ If you get "Permission denied" for `/dev/uinput`:
 2. **Verify device exists**: `ls -la /dev/uinput`
 3. **Use sudo**: The application is designed to run with `sudo -E`
 
+### Global Hotkey Issues (Wayland)
+
+If the Super+X hotkey doesn't work on Wayland:
+
+1. **Compositor Support**: Global hotkeys on Wayland have limited support. Not all compositors support the libei protocol used by the `global-hotkey` crate.
+2. **Workaround**: Configure the hotkey in your compositor's settings to send a signal or run a command to toggle the application.
+3. **Alternative**: Use the system tray icon to toggle listening instead.
+4. **X11**: Global hotkeys work reliably on X11-based systems.
+
 ## Development
 
 ### Project Structure
@@ -168,6 +192,7 @@ src/
 ├── virtual_keyboard.rs  # Virtual keyboard device management
 ├── audio_input.rs       # Audio capture and processing
 ├── stt_client.rs        # WebSocket STT client
+├── tray_icon.rs         # System tray icon management
 └── input_event.rs       # Linux input event constants
 ```
 
