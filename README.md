@@ -11,6 +11,9 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 - **Voice-to-Text**: Real-time speech recognition using Deepgram's **Flux** API service (turn-taking STT)
 - **Virtual Keyboard**: Creates a virtual input device that works with all applications
 - **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections
+- **Toggle Control**: Enable/disable listening with keyboard shortcut (via D-Bus) or system tray icon
+- **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
+- **D-Bus Integration**: Control via D-Bus for GNOME Wayland and other desktop environments
 
 ## Architecture
 
@@ -29,10 +32,10 @@ The application solves a common Linux privilege problem:
 curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh
 
 # Install required system packages (Fedora/RHEL)
-sudo dnf install alsa-lib-devel
+sudo dnf install alsa-lib-devel gtk3-devel libxdo-devel
 
 # Install required system packages (Ubuntu/Debian)
-sudo apt install libasound2-dev
+sudo apt install libasound2-dev libgtk-3-dev libxdo-dev pkg-config
 ```
 
 ### Build
@@ -75,6 +78,30 @@ sudo -E ./target/debug/voice-keyboard --test-stt
 ```
 
 **Important**: Always use `sudo -E` to preserve environment variables needed for audio access.
+
+### Toggle Control
+
+The application starts in **inactive** mode (not listening). You can toggle listening on/off using:
+
+- **Keyboard Shortcut** (Recommended for Wayland):
+  - Configure a custom keyboard shortcut in your desktop environment settings
+  - Command: `dbus-send --session --type=method_call --dest=com.voicekeyboard.App /com/voicekeyboard/Control com.voicekeyboard.Control.Toggle`
+  - See [DBUS_INTEGRATION.md](DBUS_INTEGRATION.md) for detailed setup instructions for GNOME, KDE, i3/Sway, and more
+  
+- **System Tray Icon**: 
+  - Click the tray icon menu and select "Toggle STT"
+  - Green icon = actively listening
+  - Red icon = inactive (not listening)
+  - Right-click the icon to access the menu
+
+- **Command Line**:
+  ```bash
+  dbus-send --session --type=method_call --dest=com.voicekeyboard.App /com/voicekeyboard/Control com.voicekeyboard.Control.Toggle
+  ```
+
+When inactive, audio recording is completely stopped to conserve system resources.
+
+For complete D-Bus integration guide including desktop-specific setup instructions, see [DBUS_INTEGRATION.md](DBUS_INTEGRATION.md).
 
 ## Speech-to-Text Service
 
@@ -158,6 +185,17 @@ If you get "Permission denied" for `/dev/uinput`:
 2. **Verify device exists**: `ls -la /dev/uinput`
 3. **Use sudo**: The application is designed to run with `sudo -E`
 
+### Keyboard Shortcut Setup
+
+The application uses D-Bus for keyboard shortcut integration, which works on both X11 and Wayland:
+
+1. **Configure in your desktop environment**: Follow the instructions in [DBUS_INTEGRATION.md](DBUS_INTEGRATION.md) for your specific desktop (GNOME, KDE, i3/Sway, etc.)
+2. **Test the D-Bus command manually** before setting up the shortcut:
+   ```bash
+   dbus-send --session --type=method_call --dest=com.voicekeyboard.App /com/voicekeyboard/Control com.voicekeyboard.Control.Toggle
+   ```
+3. **Alternative**: Use the system tray icon to toggle listening
+
 ## Development
 
 ### Project Structure
@@ -168,6 +206,8 @@ src/
 ├── virtual_keyboard.rs  # Virtual keyboard device management
 ├── audio_input.rs       # Audio capture and processing
 ├── stt_client.rs        # WebSocket STT client
+├── tray_icon.rs         # System tray icon management
+├── dbus_service.rs      # D-Bus interface for external control
 └── input_event.rs       # Linux input event constants
 ```
 
@@ -178,6 +218,8 @@ src/
 - **AudioInput**: Cross-platform audio capture
 - **SttClient**: WebSocket-based speech-to-text client
 - **AudioBuffer**: Manages audio chunking for STT streaming
+- **DbusService**: D-Bus interface for external control and desktop integration
+- **TrayManager**: System tray icon with state visualization
 
 ## License
 

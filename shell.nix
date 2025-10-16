@@ -21,6 +21,12 @@ mkShell {
     pkg-config
     rust-analyzer
     rustChannel
+    gtk3
+    gdk-pixbuf
+    pango
+    cairo
+    glib
+    libxdo
   ];
 
   shellHook = ''
