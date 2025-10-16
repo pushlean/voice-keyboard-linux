@@ -13,14 +13,14 @@
 ### 2. **New Module: tray_icon.rs**
 Created a complete system tray icon manager with:
 - Visual indicator (green = active, red = inactive)
-- Menu items: "Toggle STT (Super+X)" and "Quit"
+- Menu items: "Toggle STT (Super+M)" and "Quit"
 - Icon updates when state changes
 - Event handling for menu clicks
 
 ### 3. **Modified: main.rs**
 Completely refactored the `run_stt` function to support:
 - Shared state management with `Arc<Mutex<bool>>`
-- Global hotkey registration (Super+X)
+- Global hotkey registration (Super+M)
 - Dynamic audio recording start/stop
 - Event loop for handling hotkey and tray icon events
 - Application starts in inactive mode (not listening)

@@ -313,15 +313,15 @@ where
     let mut tray_manager = tray_icon::TrayManager::new(is_active.clone())
         .context("Failed to create system tray icon")?;
 
-    // Set up global hotkey (Super+X)
+    // Set up global hotkey (Super+M)
     let hotkey_manager = GlobalHotKeyManager::new()
         .context("Failed to initialize global hotkey manager")?;
     
-    let super_x = HotKey::new(Some(Modifiers::SUPER), Code::KeyX);
-    hotkey_manager.register(super_x)
-        .context("Failed to register Super+X hotkey")?;
+    let super_m = HotKey::new(Some(Modifiers::SUPER), Code::KeyM);
+    hotkey_manager.register(super_m)
+        .context("Failed to register Super+M hotkey")?;
     
-    info!("Registered global hotkey: Super+X");
+    info!("Registered global hotkey: Super+M");
 
     // Use channels to communicate toggle commands to STT thread
     let (cmd_tx, cmd_rx) = mpsc::channel::<SttCommand>();
@@ -432,7 +432,7 @@ where
         
         // Check for hotkey events
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.id == super_x.id() {
+            if event.id == super_m.id() {
                 let mut active = is_active.lock();
                 *active = !*active;
                 let new_state = *active;

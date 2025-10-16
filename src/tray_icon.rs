@@ -14,7 +14,7 @@ pub struct TrayManager {
 impl TrayManager {
     pub fn new(is_active: Arc<Mutex<bool>>) -> Result<Self> {
         // Create menu items
-        let toggle_item = MenuItem::new("Toggle STT (Super+X)", true, None);
+        let toggle_item = MenuItem::new("Toggle STT (Super+M)", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
