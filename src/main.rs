@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::{Code, HotKey, Modifiers}};
 use nix::unistd::{getgid, getuid, setgid, setuid, Gid, Uid};
 use parking_lot::Mutex;
 use std::env;
@@ -12,6 +11,7 @@ use std::time::Duration;
 use tracing::{debug, error, info};
 
 mod audio_input;
+mod dbus_service;
 mod input_event;
 mod stt_client;
 mod tray_icon;
@@ -303,7 +303,7 @@ where
     drop(temp_audio);
 
     info!("Voice Keyboard is ready!");
-    info!("Press Super+X to toggle listening, or use the tray icon.");
+    info!("Use the tray icon or D-Bus to toggle listening.");
     info!("Press Ctrl+C to quit.");
 
     // Shared state for STT active/inactive
@@ -313,18 +313,26 @@ where
     let mut tray_manager = tray_icon::TrayManager::new(is_active.clone())
         .context("Failed to create system tray icon")?;
 
-    // Set up global hotkey (Super+M)
-    let hotkey_manager = GlobalHotKeyManager::new()
-        .context("Failed to initialize global hotkey manager")?;
-    
-    let super_m = HotKey::new(Some(Modifiers::SUPER), Code::KeyM);
-    hotkey_manager.register(super_m)
-        .context("Failed to register Super+M hotkey")?;
-    
-    info!("Registered global hotkey: Super+M");
-
     // Use channels to communicate toggle commands to STT thread
     let (cmd_tx, cmd_rx) = mpsc::channel::<SttCommand>();
+    
+    // Set up D-Bus service
+    let dbus_service = dbus_service::DbusService::new(is_active.clone());
+    let cmd_tx_dbus = cmd_tx.clone();
+    dbus_service.set_toggle_callback(move |new_state| {
+        info!("D-Bus toggle: {}", if new_state { "active" } else { "inactive" });
+        
+        // Send command to STT thread
+        let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
+        let _ = cmd_tx_dbus.send(cmd);
+    });
+    
+    // Spawn D-Bus service in background
+    tokio::spawn(async move {
+        if let Err(e) = dbus_service.start().await {
+            error!("D-Bus service error: {}", e);
+        }
+    });
     
     // Clone necessary values for the STT thread
     let stt_url = stt_url.to_string();
@@ -423,31 +431,12 @@ where
         }
     });
 
-    // Event loop on main thread for hotkey and tray events
+    // Event loop on main thread for tray events
+    let mut last_state = false;
     loop {
         // Process GTK events (required for tray icon to work)
         while gtk::events_pending() {
             gtk::main_iteration_do(false);
-        }
-        
-        // Check for hotkey events
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.id == super_m.id() {
-                let mut active = is_active.lock();
-                *active = !*active;
-                let new_state = *active;
-                drop(active);
-
-                info!("Hotkey toggle: {}", if new_state { "active" } else { "inactive" });
-                
-                if let Err(e) = tray_manager.update_icon(new_state) {
-                    error!("Failed to update tray icon: {}", e);
-                }
-                
-                // Send command to STT thread
-                let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
-                let _ = cmd_tx.send(cmd);
-            }
         }
 
         // Check for tray menu events
@@ -461,6 +450,15 @@ where
                 let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
                 let _ = cmd_tx.send(cmd);
             }
+        }
+
+        // Check if state was changed externally (e.g., via D-Bus) and update tray icon
+        let current_state = *is_active.lock();
+        if current_state != last_state {
+            if let Err(e) = tray_manager.update_icon(current_state) {
+                error!("Failed to update tray icon: {}", e);
+            }
+            last_state = current_state;
         }
 
         thread::sleep(Duration::from_millis(100));

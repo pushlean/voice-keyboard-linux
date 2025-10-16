@@ -6,7 +6,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tracing::{debug, info};
 
 pub struct TrayManager {
-    _tray_icon: TrayIcon,
+    tray_icon: TrayIcon,
     toggle_item: MenuItem,
     is_active: Arc<Mutex<bool>>,
 }
@@ -14,7 +14,7 @@ pub struct TrayManager {
 impl TrayManager {
     pub fn new(is_active: Arc<Mutex<bool>>) -> Result<Self> {
         // Create menu items
-        let toggle_item = MenuItem::new("Toggle STT (Super+M)", true, None);
+        let toggle_item = MenuItem::new("Toggle STT", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
@@ -33,7 +33,7 @@ impl TrayManager {
         info!("System tray icon created");
 
         Ok(Self {
-            _tray_icon: tray_icon,
+            tray_icon,
             toggle_item: toggle_item,
             is_active,
         })
@@ -88,8 +88,8 @@ impl TrayManager {
             "Voice Keyboard - Inactive"
         };
 
-        self._tray_icon.set_icon(Some(icon))?;
-        self._tray_icon.set_tooltip(Some(tooltip))?;
+        self.tray_icon.set_icon(Some(icon))?;
+        self.tray_icon.set_tooltip(Some(tooltip))?;
         
         debug!("Tray icon updated: {}", if active { "active" } else { "inactive" });
         Ok(())
