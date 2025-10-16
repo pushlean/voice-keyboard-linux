@@ -5,6 +5,7 @@ use nix::unistd::{getgid, getuid, setgid, setuid, Gid, Uid};
 use parking_lot::Mutex;
 use std::env;
 use std::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -272,14 +273,20 @@ async fn debug_stt(stt_url: &str) -> Result<()> {
     .await
 }
 
-enum AudioCommand {
+enum SttCommand {
     Start,
     Stop,
 }
 
+struct ActiveSttSession {
+    audio_tx: tokio_mpsc::Sender<Vec<u8>>,
+    _handle: tokio::task::JoinHandle<Result<()>>, // Kept alive to maintain the async task
+    _audio_input: AudioInput, // Kept alive to maintain audio stream
+}
+
 async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
 where
-    F: Fn(stt_client::TranscriptionResult) + Send + 'static,
+    F: Fn(stt_client::TranscriptionResult) + Send + 'static + Clone,
 {
     // Initialize GTK for tray icon
     gtk::init().context("Failed to initialize GTK")?;
@@ -295,19 +302,9 @@ where
     );
     drop(temp_audio);
 
-    let stt_client = SttClient::new(stt_url, sample_rate);
-
-    info!(?stt_url, "Connecting to STT service...");
-    let (audio_tx, handle) = stt_client
-        .connect_and_transcribe(on_transcription)
-        .await
-        .context("Failed to connect to STT service")?;
-
     info!("Voice Keyboard is ready!");
     info!("Press Super+X to toggle listening, or use the tray icon.");
     info!("Press Ctrl+C to quit.");
-
-    let audio_tx = std::sync::Arc::new(audio_tx);
 
     // Shared state for STT active/inactive
     let is_active = Arc::new(Mutex::new(false));
@@ -326,72 +323,107 @@ where
     
     info!("Registered global hotkey: Super+X");
 
-    // Use channels to communicate toggle commands to audio thread
-    let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
+    // Use channels to communicate toggle commands to STT thread
+    let (cmd_tx, cmd_rx) = mpsc::channel::<SttCommand>();
     
-    // Spawn dedicated audio thread (create AudioInput inside the thread)
+    // Clone necessary values for the STT thread
+    let stt_url = stt_url.to_string();
+    
+    // Spawn dedicated STT management thread
     thread::spawn(move || {
-        // Create audio input on this thread
-        let mut audio_input = match AudioInput::new() {
-            Ok(ai) => ai,
-            Err(e) => {
-                error!("Failed to create audio input: {}", e);
-                return;
-            }
-        };
+        // Create a new tokio runtime for this thread
+        let rt = tokio::runtime::Runtime::new().unwrap();
         
-        let audio_buffer = AudioBuffer::new(sample_rate, 160);
+        // Track current active session
+        let mut active_session: Option<ActiveSttSession> = None;
         
         for command in cmd_rx {
             match command {
-                AudioCommand::Start => {
-                    // Start recording
-                    info!("Starting audio recording...");
-                    let audio_tx_clone = audio_tx.clone();
-                    let audio_buffer_clone = Arc::new(Mutex::new(audio_buffer.clone()));
+                SttCommand::Start => {
+                    // If there's an existing session, close it first
+                    if let Some(session) = active_session.take() {
+                        info!("Closing existing STT session...");
+                        drop(session.audio_tx); // This will trigger WebSocket cleanup
+                        drop(session._audio_input); // Stop audio recording
+                        // Don't wait for handle to finish, just move on
+                    }
                     
-                    if let Err(e) = audio_input.start_recording(move |data| {
-                        debug!("Received audio data: {} samples", data.len());
+                    // Create new STT connection
+                    info!("Creating new STT connection...");
+                    let stt_client = SttClient::new(&stt_url, sample_rate);
+                    let on_transcription_clone = on_transcription.clone();
+                    
+                    match rt.block_on(stt_client.connect_and_transcribe(on_transcription_clone)) {
+                        Ok((audio_tx, handle)) => {
+                            info!("STT connection established");
+                            
+                            // Create audio input on this thread
+                            let mut audio_input = match AudioInput::new() {
+                                Ok(ai) => ai,
+                                Err(e) => {
+                                    error!("Failed to create audio input: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Start recording
+                            info!("Starting audio recording...");
+                            let audio_tx_clone = audio_tx.clone();
+                            let audio_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate, 160)));
+                            
+                            if let Err(e) = audio_input.start_recording(move |data| {
+                                debug!("Received audio data: {} samples", data.len());
 
-                        // Average stereo channels to mono
-                        let mono_data: Vec<f32> = if channels == 2 {
-                            let mut mono = Vec::with_capacity(data.len() / 2);
-                            for chunk in data.chunks_exact(2) {
-                                mono.push((chunk[0] + chunk[1]) / 2.0);
-                            }
-                            debug!("Averaged samples: {}", mono.len());
-                            mono
-                        } else {
-                            data.to_vec()
-                        };
+                                // Average stereo channels to mono
+                                let mono_data: Vec<f32> = if channels == 2 {
+                                    let mut mono = Vec::with_capacity(data.len() / 2);
+                                    for chunk in data.chunks_exact(2) {
+                                        mono.push((chunk[0] + chunk[1]) / 2.0);
+                                    }
+                                    debug!("Averaged samples: {}", mono.len());
+                                    mono
+                                } else {
+                                    data.to_vec()
+                                };
 
-                        // Create audio chunks and send them
-                        let mut buffer = audio_buffer_clone.lock();
-                        let chunks = buffer.add_samples(&mono_data);
-                        for chunk in chunks {
-                            debug!("Sending audio chunk: {} bytes", chunk.len());
-                            if let Err(e) = audio_tx_clone.blocking_send(chunk) {
-                                error!("Failed to send audio chunk: {}", e);
+                                // Create audio chunks and send them
+                                let mut buffer = audio_buffer.lock();
+                                let chunks = buffer.add_samples(&mono_data);
+                                for chunk in chunks {
+                                    debug!("Sending audio chunk: {} bytes", chunk.len());
+                                    if let Err(e) = audio_tx_clone.blocking_send(chunk) {
+                                        error!("Failed to send audio chunk: {}", e);
+                                    }
+                                }
+                            }) {
+                                error!("Failed to start recording: {}", e);
+                                continue;
                             }
+                            
+                            // Store the complete session (connection + audio input)
+                            active_session = Some(ActiveSttSession {
+                                audio_tx,
+                                _handle: handle,
+                                _audio_input: audio_input,
+                            });
                         }
-                    }) {
-                        error!("Failed to start recording: {}", e);
+                        Err(e) => {
+                            error!("Failed to create STT connection: {}", e);
+                        }
                     }
                 }
-                AudioCommand::Stop => {
-                    // Stop recording
-                    info!("Stopping audio recording...");
-                    audio_input.stop_recording();
+                SttCommand::Stop => {
+                    // Close session: this will drop the WebSocket connection and stop audio recording
+                    if let Some(session) = active_session.take() {
+                        info!("Stopping STT session...");
+                        drop(session); // Drops audio_tx (closes WebSocket) and _audio_input (stops recording)
+                    }
                 }
             }
         }
     });
 
     // Event loop on main thread for hotkey and tray events
-    let handle_clone = tokio::spawn(async move {
-        handle.await
-    });
-    
     loop {
         // Process GTK events (required for tray icon to work)
         while gtk::events_pending() {
@@ -412,8 +444,8 @@ where
                     error!("Failed to update tray icon: {}", e);
                 }
                 
-                // Send command to audio thread
-                let cmd = if new_state { AudioCommand::Start } else { AudioCommand::Stop };
+                // Send command to STT thread
+                let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
                 let _ = cmd_tx.send(cmd);
             }
         }
@@ -425,22 +457,12 @@ where
                 
                 info!("Tray toggle: {}", if new_state { "active" } else { "inactive" });
                 
-                // Send command to audio thread
-                let cmd = if new_state { AudioCommand::Start } else { AudioCommand::Stop };
+                // Send command to STT thread
+                let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
                 let _ = cmd_tx.send(cmd);
             }
         }
 
-        // Check if STT handle is done
-        if handle_clone.is_finished() {
-            break;
-        }
-
         thread::sleep(Duration::from_millis(100));
     }
-
-    // Wait for the STT client to finish
-    handle_clone.await???;
-
-    Ok(())
 }
