@@ -220,13 +220,17 @@ unsafe impl Sync for RealKeyboardHardware {}
 pub struct VirtualKeyboard<H: KeyboardHardware> {
     hardware: H,
     current_text: String,
+    delay_input: bool,
+    eager_eot_finalized: bool,  // Track if we've finalized due to eager EOT
 }
 
 impl<H: KeyboardHardware> VirtualKeyboard<H> {
-    pub fn new(hardware: H) -> Self {
+    pub fn new(hardware: H, delay_input: bool) -> Self {
         Self {
             hardware,
             current_text: String::new(),
+            delay_input,
+            eager_eot_finalized: false,
         }
     }
 
@@ -238,6 +242,12 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
             "Updating transcript from '{}' to '{}'",
             self.current_text, new_transcript
         );
+
+        // If delay_input is enabled, just store the transcript without typing
+        if self.delay_input {
+            self.current_text = new_transcript.to_string();
+            return Ok(());
+        }
 
         // If the new transcript is empty, clear everything
         if new_transcript.is_empty() {
@@ -299,6 +309,24 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
     /// Otherwise, just finalize without pressing enter
     pub fn finalize_transcript(&mut self) -> Result<()> {
         debug!("Finalizing transcript: '{}'", self.current_text);
+
+        // If delay_input is enabled, type the complete text and clear
+        if self.delay_input {
+            // If we already finalized due to eager EOT, skip typing again
+            if self.eager_eot_finalized {
+                debug!("Skipping finalize - already finalized on eager EOT");
+                self.eager_eot_finalized = false;  // Reset for next turn
+                self.current_text.clear();
+                return Ok(());
+            }
+            
+            if !self.current_text.is_empty() {
+                self.hardware.type_text(&self.current_text)?;
+            }
+            self.current_text.clear();
+            self.hardware.type_text(" ")?;
+            return Ok(());
+        }
 
         // Regex to match "enter" (case-insensitive) at the end, optionally followed by
         // punctuation and/or whitespace: (?i)\s*\benter\b[[:punct:]\s]*$
@@ -379,6 +407,16 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
     pub fn get_current_text(&self) -> &str {
         &self.current_text
     }
+
+    /// Mark that we've finalized due to eager end of turn
+    pub fn mark_eager_eot_finalized(&mut self) {
+        self.eager_eot_finalized = true;
+    }
+
+    /// Reset eager EOT flag (called when turn is resumed)
+    pub fn reset_eager_eot_flag(&mut self) {
+        self.eager_eot_finalized = false;
+    }
 }
 
 /// Mock hardware implementation for testing
@@ -431,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_incremental_typing_extension() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
@@ -451,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_incremental_typing_change() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
@@ -471,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_finalize_transcript() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type some text
         kb.update_transcript("hello").unwrap();
@@ -487,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_empty_transcript() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with some text
         kb.update_transcript("hello").unwrap();
@@ -501,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_smart_backspacing_partial_change() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with "hello world"
         kb.update_transcript("hello world").unwrap();
@@ -524,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_smart_backspacing_no_common_prefix() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
@@ -540,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_smart_backspacing_shortening() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Start with "hello world"
         kb.update_transcript("hello world").unwrap();
@@ -556,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_finalize_with_enter_command() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type text ending with "enter"
         kb.update_transcript("Write a unit test enter").unwrap();
@@ -573,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_finalize_with_enter_only() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type only "enter"
         kb.update_transcript("enter").unwrap();
@@ -590,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_finalize_with_enter_case_insensitive() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type text ending with "ENTER" (uppercase)
         kb.update_transcript("hello ENTER").unwrap();
@@ -607,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_finalize_without_enter_command() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type text not ending with "enter"
         kb.update_transcript("hello world").unwrap();
@@ -625,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_finalize_with_enter_in_middle() {
-        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
 
         // Type text with "enter" in the middle, not at the end
         kb.update_transcript("enter the room").unwrap();
@@ -653,7 +691,7 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
@@ -688,7 +726,7 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
@@ -724,7 +762,7 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
@@ -754,7 +792,7 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
@@ -788,7 +826,7 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), false);
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
@@ -806,5 +844,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_delayed_input_no_incremental_typing() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // First update should not type anything
+        kb.update_transcript("hello").unwrap();
+        assert_eq!(kb.current_text, "hello");
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+
+        // Second update should still not type anything
+        kb.update_transcript("hello world").unwrap();
+        assert_eq!(kb.current_text, "hello world");
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+
+        // Third update - change the text
+        kb.update_transcript("goodbye").unwrap();
+        assert_eq!(kb.current_text, "goodbye");
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+    }
+
+    #[test]
+    fn test_delayed_input_finalize() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // Update transcript multiple times
+        kb.update_transcript("hello").unwrap();
+        kb.update_transcript("hello world").unwrap();
+        kb.update_transcript("hello world test").unwrap();
+
+        // Nothing should be typed yet
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+
+        // Finalize should type the complete text
+        kb.finalize_transcript().unwrap();
+
+        // Should have typed "hello world test "
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ', 't', 'e', 's', 't', ' ']
+        );
+        assert_eq!(kb.current_text, "");
+    }
+
+    #[test]
+    fn test_delayed_input_no_enter_detection() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // Type text ending with "enter"
+        kb.update_transcript("hello enter").unwrap();
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+
+        // Finalize should type everything including "enter" (no enter detection in delayed mode)
+        kb.finalize_transcript().unwrap();
+
+        // Should have typed "hello enter " (not pressing ENTER key)
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'e', 'l', 'l', 'o', ' ', 'e', 'n', 't', 'e', 'r', ' ']
+        );
+        assert!(!kb.hardware.enter_pressed);
+    }
+
+    #[test]
+    fn test_delayed_input_empty_finalize() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // Finalize with empty transcript
+        kb.finalize_transcript().unwrap();
+
+        // Should only type a space
+        assert_eq!(kb.hardware.typed_chars, [' ']);
+        assert_eq!(kb.current_text, "");
+    }
+
+    #[test]
+    fn test_eager_eot_prevents_double_typing() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // Simulate eager end of turn scenario
+        kb.update_transcript("hello world").unwrap();
+        assert_eq!(kb.hardware.typed_chars.len(), 0); // Nothing typed yet in delayed mode
+
+        // First finalization (eager EOT)
+        kb.finalize_transcript().unwrap();
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ']
+        );
+        
+        // Mark that we've done eager EOT finalization
+        kb.mark_eager_eot_finalized();
+
+        // Second finalization (regular EndOfTurn) should not type anything
+        kb.finalize_transcript().unwrap();
+        // Should still be the same - no additional typing
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ']
+        );
+    }
+
+    #[test]
+    fn test_eager_eot_with_turn_resumed() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new(), true);
+
+        // First part of speech
+        kb.update_transcript("hello").unwrap();
+        assert_eq!(kb.hardware.typed_chars.len(), 0);
+
+        // Eager EOT - finalize and mark
+        kb.finalize_transcript().unwrap();
+        kb.mark_eager_eot_finalized();
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ']);
+
+        // Turn resumed - reset flag
+        kb.reset_eager_eot_flag();
+
+        // Continue speaking
+        kb.update_transcript("world").unwrap();
+        
+        // Final EndOfTurn should type the new content
+        kb.finalize_transcript().unwrap();
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ']
+        );
     }
 }

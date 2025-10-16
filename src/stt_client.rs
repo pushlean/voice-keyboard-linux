@@ -48,6 +48,16 @@ enum ServerMessage {
         words: Vec<WordInfo>,
         end_of_turn_confidence: f64,
     },
+    EagerEndOfTurn {
+        request_id: String,
+        sequence_id: u32,
+        turn_index: u32,
+    },
+    TurnResumed {
+        request_id: String,
+        sequence_id: u32,
+        turn_index: u32,
+    },
     Error {
         #[serde(default)]
         sequence_id: Option<u32>,
@@ -105,13 +115,23 @@ fn enrich_ws_error(err: WsError) -> anyhow::Error {
 pub struct SttClient {
     url: String,
     sample_rate: u32,
+    eager_eot_threshold: Option<f64>,
+    #[allow(dead_code)]
+    eot_threshold: Option<f64>,
 }
 
 impl SttClient {
+    #[allow(dead_code)]
     pub fn new(url: &str, sample_rate: u32) -> Self {
+        Self::with_eot_thresholds(url, sample_rate, Some(0.6), Some(0.8))
+    }
+
+    pub fn with_eot_thresholds(url: &str, sample_rate: u32, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>) -> Self {
         Self {
             url: url.to_string(),
             sample_rate,
+            eager_eot_threshold,
+            eot_threshold,
         }
     }
 
@@ -123,10 +143,20 @@ impl SttClient {
         F: FnMut(TranscriptionResult) + Send + 'static,
     {
         // Build WebSocket URL with query parameters
-        let ws_url = format!(
+        // eager_eot_threshold enables eager end-of-turn detection (range 0.3-0.9)
+        // eot_threshold sets the standard end-of-turn confidence threshold (range 0.3-0.9)
+        let mut ws_url = format!(
             "{}?model=flux-general-en&sample_rate={}&encoding=linear16&mip_opt_out=true",
             self.url, self.sample_rate
         );
+        
+        if let Some(threshold) = self.eager_eot_threshold {
+            ws_url.push_str(&format!("&eager_eot_threshold={}", threshold));
+        }
+        
+        if let Some(threshold) = self.eot_threshold {
+            ws_url.push_str(&format!("&eot_threshold={}", threshold));
+        }
 
         debug!("Connecting to speech-to-text service: {}", ws_url);
 
@@ -224,6 +254,42 @@ impl SttClient {
                                     preflight_threshold,
                                 } => {
                                     info!("Configuration ack: eot_threshold={:?}, preflight_threshold={:?}", eot_threshold, preflight_threshold);
+                                }
+                                ServerMessage::EagerEndOfTurn {
+                                    request_id: _,
+                                    sequence_id: _,
+                                    turn_index,
+                                } => {
+                                    info!("EagerEndOfTurn detected for turn_index={}", turn_index);
+                                    // Send a special EagerEndOfTurn event to the callback
+                                    let result = TranscriptionResult {
+                                        event: "EagerEndOfTurn".to_string(),
+                                        turn_index,
+                                        start: 0.0,
+                                        timestamp: 0.0,
+                                        transcript: String::new(),
+                                        words: Vec::new(),
+                                        end_of_turn_confidence: 0.0,
+                                    };
+                                    on_transcription(result);
+                                }
+                                ServerMessage::TurnResumed {
+                                    request_id: _,
+                                    sequence_id: _,
+                                    turn_index,
+                                } => {
+                                    info!("TurnResumed for turn_index={}", turn_index);
+                                    // Send a special TurnResumed event to the callback
+                                    let result = TranscriptionResult {
+                                        event: "TurnResumed".to_string(),
+                                        turn_index,
+                                        start: 0.0,
+                                        timestamp: 0.0,
+                                        transcript: String::new(),
+                                        words: Vec::new(),
+                                        end_of_turn_confidence: 0.0,
+                                    };
+                                    on_transcription(result);
                                 }
                                 ServerMessage::Error {
                                     sequence_id,

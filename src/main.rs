@@ -142,15 +142,69 @@ async fn main() -> Result<()> {
                 .help("Custom STT service URL")
                 .value_name("URL"),
         )
+        .arg(
+            Arg::new("live-mode")
+                .default_value("false")
+                .long("live-mode")
+                .help("Type text immediately as it's transcribed (default: wait until end of turn)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("eager-eot-threshold")
+                .long("eager-eot-threshold")
+                .help("Eager end-of-turn threshold (0.3-0.9, default: 0.6)")
+                .value_name("THRESHOLD"),
+        )
+        .arg(
+            Arg::new("eot-threshold")
+                .long("eot-threshold")
+                .help("Standard end-of-turn threshold (0.5-0.9, default: 0.8, must be > eager-eot-threshold)")
+                .value_name("THRESHOLD"),
+        )
         .get_matches();
 
+    // Parse and validate thresholds from command line BEFORE creating keyboard
+    let eager_eot_threshold = matches
+        .get_one::<String>("eager-eot-threshold")
+        .and_then(|s| s.parse::<f64>().ok())
+        .or(Some(0.6)); // Default to 0.6 if not specified
+
+    let eot_threshold = matches
+        .get_one::<String>("eot-threshold")
+        .and_then(|s| s.parse::<f64>().ok())
+        .or(Some(0.8)); // Default to 0.8 if not specified
+
+    // Validate thresholds according to Deepgram API specs
+    if let Some(eager) = eager_eot_threshold {
+        if eager < 0.3 || eager > 0.9 {
+            error!("Error: eager-eot-threshold must be between 0.3 and 0.9 (got {})", eager);
+            std::process::exit(1);
+        }
+    }
+
+    if let Some(standard) = eot_threshold {
+        if standard < 0.5 || standard > 0.9 {
+            error!("Error: eot-threshold must be between 0.5 and 0.9 (got {})", standard);
+            std::process::exit(1);
+        }
+    }
+
+    if let (Some(eager), Some(standard)) = (eager_eot_threshold, eot_threshold) {
+        if eager >= standard {
+            error!("Error: eager-eot-threshold ({}) must be less than eot-threshold ({})", eager, standard);
+            error!("The eager threshold should trigger faster (lower value) than the standard threshold.");
+            std::process::exit(1);
+        }
+    }
+
     let device_name = "Voice Keyboard";
+    let delay_input = !matches.get_flag("live-mode");
 
     // Step 1: Create virtual keyboard while we have root privileges
     debug!("Creating virtual keyboard device (requires root privileges)...");
     let hardware =
         RealKeyboardHardware::new(device_name).context("Failed to create keyboard hardware")?;
-    let keyboard = VirtualKeyboard::new(hardware);
+    let keyboard = VirtualKeyboard::new(hardware, delay_input);
     debug!("Virtual keyboard created successfully");
 
     // Step 2: Drop root privileges before initializing audio
@@ -165,7 +219,7 @@ async fn main() -> Result<()> {
             .get_one::<String>("stt-url")
             .map(|s| s.as_str())
             .unwrap_or(stt_client::STT_URL);
-        test_stt(keyboard, stt_url).await?;
+        test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold).await?;
     } else {
         let debug_mode = matches.get_flag("debug-stt");
         let stt_url = matches
@@ -174,9 +228,9 @@ async fn main() -> Result<()> {
             .unwrap_or(stt_client::STT_URL);
 
         if debug_mode {
-            debug_stt(stt_url).await?;
+            debug_stt(stt_url, eager_eot_threshold, eot_threshold).await?;
         } else {
-            test_stt(keyboard, stt_url).await?;
+            test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold).await?;
         }
     }
 
@@ -225,14 +279,14 @@ async fn test_audio() -> Result<()> {
     Ok(())
 }
 
-async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str) -> Result<()> {
+async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>) -> Result<()> {
     info!("Testing speech-to-text functionality...");
 
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
 
-    run_stt(stt_url, move |result| {
+    run_stt(stt_url, eager_eot_threshold, eot_threshold, move |result| {
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
         }
@@ -248,6 +302,21 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
                     std::process::exit(1);
                 }
             }
+            "EagerEndOfTurn" => {
+                // Eager end of turn detected - finalize transcript
+                info!("Eager end of turn detected, finalizing transcript");
+                if let Err(e) = kb.finalize_transcript() {
+                    error!("Failed to finalize transcript on eager EOT: {}", e);
+                    std::process::exit(1);
+                }
+                // Mark that we've finalized so we don't do it again on EndOfTurn
+                kb.mark_eager_eot_finalized();
+            }
+            "TurnResumed" => {
+                // Turn resumed after eager EOT - reset the flag so we can finalize again
+                info!("Turn resumed, continuing transcription");
+                kb.reset_eager_eot_flag();
+            }
             _ => {
                 // Handle incremental updates; treat failure as fatal
                 if let Err(e) = kb.update_transcript(&result.transcript) {
@@ -260,11 +329,11 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
     .await
 }
 
-async fn debug_stt(stt_url: &str) -> Result<()> {
+async fn debug_stt(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>) -> Result<()> {
     info!("Debugging speech-to-text functionality...");
     info!("STT Service URL: {}", stt_url);
 
-    run_stt(stt_url, |result| {
+    run_stt(stt_url, eager_eot_threshold, eot_threshold, |result| {
         // Only show non-empty transcriptions
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
@@ -284,7 +353,7 @@ struct ActiveSttSession {
     _audio_input: AudioInput, // Kept alive to maintain audio stream
 }
 
-async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
+async fn run_stt<F>(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static + Clone,
 {
@@ -305,6 +374,12 @@ where
     info!("Voice Keyboard is ready!");
     info!("Use the tray icon or D-Bus to toggle listening.");
     info!("Press Ctrl+C to quit.");
+    if let Some(threshold) = eager_eot_threshold {
+        info!("Eager end-of-turn threshold: {}", threshold);
+    }
+    if let Some(threshold) = eot_threshold {
+        info!("Standard end-of-turn threshold: {}", threshold);
+    }
 
     // Shared state for STT active/inactive
     let is_active = Arc::new(Mutex::new(false));
@@ -358,7 +433,7 @@ where
                     
                     // Create new STT connection
                     info!("Creating new STT connection...");
-                    let stt_client = SttClient::new(&stt_url, sample_rate);
+                    let stt_client = SttClient::with_eot_thresholds(&stt_url, sample_rate, eager_eot_threshold, eot_threshold);
                     let on_transcription_clone = on_transcription.clone();
                     
                     match rt.block_on(stt_client.connect_and_transcribe(on_transcription_clone)) {
