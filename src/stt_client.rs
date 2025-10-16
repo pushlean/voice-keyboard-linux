@@ -124,7 +124,7 @@ impl SttClient {
     {
         // Build WebSocket URL with query parameters
         let ws_url = format!(
-            "{}?model=flux-general-en&sample_rate={}&encoding=linear16",
+            "{}?model=flux-general-en&sample_rate={}&encoding=linear16&mip_opt_out=true",
             self.url, self.sample_rate
         );
 
