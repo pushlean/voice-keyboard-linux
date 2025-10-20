@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
         .arg(
             Arg::new("eager-eot-threshold")
                 .long("eager-eot-threshold")
-                .help("Eager end-of-turn threshold (0.3-0.9, default: 0.6)")
+                .help("Eager end-of-turn threshold (0.3-0.9, omit to disable)")
                 .value_name("THRESHOLD"),
         )
         .arg(
@@ -166,8 +166,7 @@ async fn main() -> Result<()> {
     // Parse and validate thresholds from command line BEFORE creating keyboard
     let eager_eot_threshold = matches
         .get_one::<String>("eager-eot-threshold")
-        .and_then(|s| s.parse::<f64>().ok())
-        .or(Some(0.6)); // Default to 0.6 if not specified
+        .and_then(|s| s.parse::<f64>().ok()); // None if not specified (disabled)
 
     let eot_threshold = matches
         .get_one::<String>("eot-threshold")
@@ -376,6 +375,8 @@ where
     info!("Press Ctrl+C to quit.");
     if let Some(threshold) = eager_eot_threshold {
         info!("Eager end-of-turn threshold: {}", threshold);
+    } else {
+        info!("Eager end-of-turn: disabled");
     }
     if let Some(threshold) = eot_threshold {
         info!("Standard end-of-turn threshold: {}", threshold);
