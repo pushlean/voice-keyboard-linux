@@ -14,6 +14,7 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 - **Toggle Control**: Enable/disable listening with keyboard shortcut (via D-Bus) or system tray icon
 - **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
 - **D-Bus Integration**: Control via D-Bus for GNOME Wayland and other desktop environments
+- **Audio Recording**: Save audio input to WAV files for debugging and analysis
 
 ## Architecture
 
@@ -113,15 +114,33 @@ This application uses **Deepgram Flux**, the company's new turn‑taking STT API
 voice-keyboard [OPTIONS]
 
 OPTIONS:
-    --test-audio        Test audio input and show levels
-    --test-stt          Test speech-to-text functionality (default if no other mode specified)
-    --debug-stt         Debug speech-to-text (print transcripts without typing)
-    --stt-url <URL>     Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
-    -h, --help          Print help information
-    -V, --version       Print version information
+    --test-audio                Test audio input and show levels
+    --test-stt                  Test speech-to-text functionality (default if no other mode specified)
+    --debug-stt                 Debug speech-to-text (print transcripts without typing)
+    --stt-url <URL>             Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
+    --save-audio <FILE_PATH>    Save audio to a WAV file (works with --test-audio)
+    --live-mode                 Type text immediately as it's transcribed (default: wait until end of turn)
+    --eager-eot-threshold <N>   Eager end-of-turn threshold (0.3-0.9, omit to disable)
+    --eot-threshold <N>         Standard end-of-turn threshold (0.5-0.9, default: 0.8)
+    -h, --help                  Print help information
+    -V, --version               Print version information
 ```
 
 **Note**: If no mode is specified, the application defaults to `--test-stt` behavior.
+
+### Audio Recording Examples
+
+**Option 1: Using the test-audio mode (requires sudo)**
+```bash
+sudo -E ./target/debug/voice-keyboard --test-audio --save-audio recording.wav
+```
+
+**Option 2: Using the standalone example (no sudo required)**
+```bash
+cargo run --example record_audio
+```
+
+Both options will record for 5 seconds and save the audio in 32-bit float WAV format. The example saves to `example_recording.wav` in the current directory.
 
 ## How It Works
 
@@ -215,7 +234,7 @@ src/
 
 - **OriginalUser**: Captures and restores user context
 - **VirtualKeyboard**: Manages uinput device lifecycle with smart transcript updates
-- **AudioInput**: Cross-platform audio capture
+- **AudioInput**: Cross-platform audio capture with optional WAV file recording
 - **SttClient**: WebSocket-based speech-to-text client
 - **AudioBuffer**: Manages audio chunking for STT streaming
 - **DbusService**: D-Bus interface for external control and desktop integration

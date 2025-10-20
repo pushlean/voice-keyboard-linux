@@ -161,6 +161,12 @@ async fn main() -> Result<()> {
                 .help("Standard end-of-turn threshold (0.5-0.9, default: 0.8, must be > eager-eot-threshold)")
                 .value_name("THRESHOLD"),
         )
+        .arg(
+            Arg::new("save-audio")
+                .long("save-audio")
+                .help("Save audio to a WAV file")
+                .value_name("FILE_PATH"),
+        )
         .get_matches();
 
     // Parse and validate thresholds from command line BEFORE creating keyboard
@@ -212,7 +218,8 @@ async fn main() -> Result<()> {
         .context("Failed to drop root privileges")?;
 
     if matches.get_flag("test-audio") {
-        test_audio().await?;
+        let save_audio_path = matches.get_one::<String>("save-audio").map(|s| s.as_str());
+        test_audio(save_audio_path).await?;
     } else if matches.get_flag("test-stt") {
         let stt_url = matches
             .get_one::<String>("stt-url")
@@ -236,7 +243,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn test_audio() -> Result<()> {
+async fn test_audio(save_audio_path: Option<&str>) -> Result<()> {
     info!("Testing audio input...");
 
     // List available devices
@@ -253,6 +260,11 @@ async fn test_audio() -> Result<()> {
         audio_input.get_channels(),
         audio_input.get_sample_rate()
     );
+
+    // Start saving to file if requested
+    if let Some(path) = save_audio_path {
+        audio_input.start_saving_to_file(path)?;
+    }
 
     // Test recording for 5 seconds
     let (tx, rx) = mpsc::channel();
@@ -272,6 +284,11 @@ async fn test_audio() -> Result<()> {
             info!("Level: {:.2} [{}]", level, bar);
         }
         thread::sleep(Duration::from_millis(50));
+    }
+
+    // Stop saving to file if it was started
+    if save_audio_path.is_some() {
+        audio_input.stop_saving_to_file()?;
     }
 
     info!("Audio test completed!");
