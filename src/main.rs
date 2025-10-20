@@ -167,6 +167,13 @@ async fn main() -> Result<()> {
                 .help("Save audio to a WAV file")
                 .value_name("FILE_PATH"),
         )
+        .arg(
+            Arg::new("inactivity-timeout")
+                .long("inactivity-timeout")
+                .help("Auto-toggle off after this many seconds of silence (default: 30)")
+                .value_name("SECONDS")
+                .default_value("30"),
+        )
         .get_matches();
 
     // Parse and validate thresholds from command line BEFORE creating keyboard
@@ -202,6 +209,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Parse inactivity timeout
+    let inactivity_timeout = matches
+        .get_one::<String>("inactivity-timeout")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+
     let device_name = "Voice Keyboard";
     let delay_input = !matches.get_flag("live-mode");
 
@@ -225,7 +238,7 @@ async fn main() -> Result<()> {
             .get_one::<String>("stt-url")
             .map(|s| s.as_str())
             .unwrap_or(stt_client::STT_URL);
-        test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold).await?;
+        test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
     } else {
         let debug_mode = matches.get_flag("debug-stt");
         let stt_url = matches
@@ -234,9 +247,9 @@ async fn main() -> Result<()> {
             .unwrap_or(stt_client::STT_URL);
 
         if debug_mode {
-            debug_stt(stt_url, eager_eot_threshold, eot_threshold).await?;
+            debug_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
         } else {
-            test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold).await?;
+            test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
         }
     }
 
@@ -295,14 +308,14 @@ async fn test_audio(save_audio_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>) -> Result<()> {
+async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
     info!("Testing speech-to-text functionality...");
 
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
 
-    run_stt(stt_url, eager_eot_threshold, eot_threshold, move |result| {
+    run_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, move |result| {
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
         }
@@ -345,11 +358,11 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
     .await
 }
 
-async fn debug_stt(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>) -> Result<()> {
+async fn debug_stt(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
     info!("Debugging speech-to-text functionality...");
     info!("STT Service URL: {}", stt_url);
 
-    run_stt(stt_url, eager_eot_threshold, eot_threshold, |result| {
+    run_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, |result| {
         // Only show non-empty transcriptions
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
@@ -369,7 +382,7 @@ struct ActiveSttSession {
     _audio_input: AudioInput, // Kept alive to maintain audio stream
 }
 
-async fn run_stt<F>(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, on_transcription: F) -> Result<()>
+async fn run_stt<F>(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static + Clone,
 {
@@ -398,9 +411,13 @@ where
     if let Some(threshold) = eot_threshold {
         info!("Standard end-of-turn threshold: {}", threshold);
     }
+    info!("Auto-toggle off after {} seconds of inactivity", inactivity_timeout);
 
     // Shared state for STT active/inactive
     let is_active = Arc::new(Mutex::new(false));
+    
+    // Track last voice activity timestamp
+    let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
     
     // Set up system tray (must stay on this thread)
     let mut tray_manager = tray_icon::TrayManager::new(is_active.clone())
@@ -420,6 +437,28 @@ where
         let _ = cmd_tx_dbus.send(cmd);
     });
     
+    // Spawn inactivity monitor thread
+    let cmd_tx_inactivity = cmd_tx.clone();
+    let last_activity_monitor = last_activity.clone();
+    let is_active_monitor = is_active.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            
+            // Only check inactivity if we're currently active
+            if *is_active_monitor.lock() {
+                let elapsed = last_activity_monitor.lock().elapsed();
+                if elapsed >= Duration::from_secs(inactivity_timeout) {
+                    info!("Inactivity timeout reached ({} seconds), auto-toggling off", inactivity_timeout);
+                    // Update is_active state first to prevent repeated logs and update tray icon
+                    *is_active_monitor.lock() = false;
+                    // Send stop command to STT thread
+                    let _ = cmd_tx_inactivity.send(SttCommand::Stop);
+                }
+            }
+        }
+    });
+    
     // Spawn D-Bus service in background
     tokio::spawn(async move {
         if let Err(e) = dbus_service.start().await {
@@ -429,6 +468,18 @@ where
     
     // Clone necessary values for the STT thread
     let stt_url = stt_url.to_string();
+    let last_activity_clone = last_activity.clone();
+    let last_activity_reset = last_activity.clone();
+    
+    // Wrap the transcription callback to update last activity time
+    let wrapped_on_transcription = move |result: stt_client::TranscriptionResult| {
+        // Update last activity time whenever we receive a non-empty transcript
+        if !result.transcript.is_empty() {
+            *last_activity_clone.lock() = std::time::Instant::now();
+        }
+        // Call the original callback
+        on_transcription(result);
+    };
     
     // Spawn dedicated STT management thread
     thread::spawn(move || {
@@ -449,10 +500,13 @@ where
                         // Don't wait for handle to finish, just move on
                     }
                     
+                    // Reset inactivity timer when starting a new session
+                    *last_activity_reset.lock() = std::time::Instant::now();
+                    
                     // Create new STT connection
                     info!("Creating new STT connection...");
                     let stt_client = SttClient::with_eot_thresholds(&stt_url, sample_rate, eager_eot_threshold, eot_threshold);
-                    let on_transcription_clone = on_transcription.clone();
+                    let on_transcription_clone = wrapped_on_transcription.clone();
                     
                     match rt.block_on(stt_client.connect_and_transcribe(on_transcription_clone)) {
                         Ok((audio_tx, handle)) => {

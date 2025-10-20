@@ -12,6 +12,7 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 - **Virtual Keyboard**: Creates a virtual input device that works with all applications
 - **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections
 - **Toggle Control**: Enable/disable listening with keyboard shortcut (via D-Bus) or system tray icon
+- **Auto-Toggle Off**: Automatically deactivates after a configurable period of silence (default: 30 seconds)
 - **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
 - **D-Bus Integration**: Control via D-Bus for GNOME Wayland and other desktop environments
 - **Audio Recording**: Save audio input to WAV files for debugging and analysis
@@ -104,6 +105,24 @@ When inactive, audio recording is completely stopped to conserve system resource
 
 For complete D-Bus integration guide including desktop-specific setup instructions, see [DBUS_INTEGRATION.md](DBUS_INTEGRATION.md).
 
+### Auto-Toggle Off
+
+The application includes an automatic toggle-off feature to conserve resources when you stop speaking:
+
+- **Default Behavior**: Automatically deactivates after **30 seconds** of silence
+- **Customization**: Use `--inactivity-timeout <SECONDS>` to adjust the timeout
+- **Activity Detection**: The timer resets whenever transcription results are received
+- **Examples**:
+  ```bash
+  # Use a 60-second timeout
+  sudo -E ./target/debug/voice-keyboard --inactivity-timeout 60
+  
+  # Disable auto-toggle by setting a very long timeout
+  sudo -E ./target/debug/voice-keyboard --inactivity-timeout 3600
+  ```
+
+This feature helps ensure the microphone isn't left on indefinitely, improving both privacy and system resource usage.
+
 ## Speech-to-Text Service
 
 This application uses **Deepgram Flux**, the company's new turn‑taking STT API. The default WebSocket URL is `wss://api.deepgram.com/v2/listen`.
@@ -114,16 +133,17 @@ This application uses **Deepgram Flux**, the company's new turn‑taking STT API
 voice-keyboard [OPTIONS]
 
 OPTIONS:
-    --test-audio                Test audio input and show levels
-    --test-stt                  Test speech-to-text functionality (default if no other mode specified)
-    --debug-stt                 Debug speech-to-text (print transcripts without typing)
-    --stt-url <URL>             Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
-    --save-audio <FILE_PATH>    Save audio to a WAV file (works with --test-audio)
-    --live-mode                 Type text immediately as it's transcribed (default: wait until end of turn)
-    --eager-eot-threshold <N>   Eager end-of-turn threshold (0.3-0.9, omit to disable)
-    --eot-threshold <N>         Standard end-of-turn threshold (0.5-0.9, default: 0.8)
-    -h, --help                  Print help information
-    -V, --version               Print version information
+    --test-audio                    Test audio input and show levels
+    --test-stt                      Test speech-to-text functionality (default if no other mode specified)
+    --debug-stt                     Debug speech-to-text (print transcripts without typing)
+    --stt-url <URL>                 Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
+    --save-audio <FILE_PATH>        Save audio to a WAV file (works with --test-audio)
+    --live-mode                     Type text immediately as it's transcribed (default: wait until end of turn)
+    --eager-eot-threshold <N>       Eager end-of-turn threshold (0.3-0.9, omit to disable)
+    --eot-threshold <N>             Standard end-of-turn threshold (0.5-0.9, default: 0.8)
+    --inactivity-timeout <SECONDS>  Auto-toggle off after this many seconds of silence (default: 30)
+    -h, --help                      Print help information
+    -V, --version                   Print version information
 ```
 
 **Note**: If no mode is specified, the application defaults to `--test-stt` behavior.
