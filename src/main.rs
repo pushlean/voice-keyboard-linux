@@ -395,6 +395,7 @@ async fn debug_stt(stt_provider: SttProvider, stt_url: Option<&String>, eager_eo
 enum SttCommand {
     Start,
     Stop,
+    Cancel, // Stop recording and discard audio without transcription
 }
 
 struct ActiveSttSession {
@@ -469,6 +470,14 @@ where
         // Send command to STT thread
         let cmd = if new_state { SttCommand::Start } else { SttCommand::Stop };
         let _ = cmd_tx_dbus.send(cmd);
+    });
+    
+    let cmd_tx_cancel = cmd_tx.clone();
+    dbus_service.set_cancel_callback(move || {
+        info!("D-Bus cancel: cancelling recording without transcription");
+        
+        // Send cancel command to STT thread
+        let _ = cmd_tx_cancel.send(SttCommand::Cancel);
     });
     
     // Spawn inactivity monitor thread
@@ -735,6 +744,19 @@ where
                                 }
                             }
                         }
+                    }
+                }
+                SttCommand::Cancel => {
+                    // Resume system audio if we paused it
+                    if let Err(e) = audio_control.on_recording_stop() {
+                        error!("Failed to control system audio: {}", e);
+                    }
+                    
+                    // Cancel recording: drop the session without transcription
+                    if let Some(session) = active_session.take() {
+                        info!("Cancelling STT session without transcription...");
+                        // Just drop everything - no transcription will occur
+                        drop(session);
                     }
                 }
             }

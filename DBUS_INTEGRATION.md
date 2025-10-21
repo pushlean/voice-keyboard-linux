@@ -65,6 +65,19 @@ dbus-send --session --type=method_call --print-reply \
   boolean:false
 ```
 
+#### `Cancel() -> bool`
+
+Cancels the current recording session without transcribing the audio. Returns `true` if a recording was active and cancelled, `false` if no recording was in progress.
+
+This is useful when you want to discard what you've said without it being typed. For example, if you realize mid-recording that you don't want to dictate anymore, you can cancel instead of stopping (which would transcribe and type the audio).
+
+```bash
+dbus-send --session --type=method_call --print-reply \
+  --dest=com.voicekeyboard.App \
+  /com/voicekeyboard/Control \
+  com.voicekeyboard.Control.Cancel
+```
+
 ## Setting Up Keyboard Shortcuts
 
 ### GNOME (Ubuntu 24.04 Wayland)
@@ -78,7 +91,15 @@ dbus-send --session --type=method_call --print-reply \
    - **Shortcut**: Press `Super+X` (or your preferred key combination)
 5. Click **Add**
 
-The shortcut will now work system-wide on Wayland!
+Optionally, you can add a second shortcut for cancelling:
+1. Click the **"+"** button again
+2. Fill in:
+   - **Name**: `Cancel Voice Keyboard Recording`
+   - **Command**: `dbus-send --session --type=method_call --dest=com.voicekeyboard.App /com/voicekeyboard/Control com.voicekeyboard.Control.Cancel`
+   - **Shortcut**: Press `Super+Escape` (or your preferred key combination)
+3. Click **Add**
+
+The shortcuts will now work system-wide on Wayland!
 
 ### KDE Plasma
 
@@ -116,6 +137,20 @@ dbus-send --session --type=method_call \
 ```
 
 Make it executable: `chmod +x ~/bin/voice-keyboard-toggle`
+
+### Cancel Script
+
+Create `~/bin/voice-keyboard-cancel`:
+
+```bash
+#!/bin/bash
+dbus-send --session --type=method_call \
+  --dest=com.voicekeyboard.App \
+  /com/voicekeyboard/Control \
+  com.voicekeyboard.Control.Cancel
+```
+
+Make it executable: `chmod +x ~/bin/voice-keyboard-cancel`
 
 ### Status Script
 
