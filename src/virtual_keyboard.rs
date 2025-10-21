@@ -238,6 +238,9 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
     /// 1. Type new characters if the new transcript extends the current one
     /// 2. Only backspace the characters that actually changed, then type the new ending
     pub fn update_transcript(&mut self, new_transcript: &str) -> Result<()> {
+        // Trim whitespace from the new transcript
+        let new_transcript = new_transcript.trim();
+        
         debug!(
             "Updating transcript from '{}' to '{}'",
             self.current_text, new_transcript
@@ -308,6 +311,9 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
     /// backspace that portion and press the ENTER key
     /// Otherwise, just finalize without pressing enter
     pub fn finalize_transcript(&mut self) -> Result<()> {
+        // Trim whitespace from the current text before finalizing
+        self.current_text = self.current_text.trim().to_string();
+        
         debug!("Finalizing transcript: '{}'", self.current_text);
 
         // If delay_input is enabled, type the complete text and clear
@@ -320,11 +326,14 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
                 return Ok(());
             }
             
+            // Only type if there's actual text (non-empty after trimming)
             if !self.current_text.is_empty() {
                 self.hardware.type_text(&self.current_text)?;
+                self.current_text.clear();
+                self.hardware.type_text(" ")?;
+            } else {
+                self.current_text.clear();
             }
-            self.current_text.clear();
-            self.hardware.type_text(" ")?;
             return Ok(());
         }
 
@@ -915,8 +924,8 @@ mod tests {
         // Finalize with empty transcript
         kb.finalize_transcript().unwrap();
 
-        // Should only type a space
-        assert_eq!(kb.hardware.typed_chars, [' ']);
+        // Should not type anything (not even a space) when transcript is empty
+        assert_eq!(kb.hardware.typed_chars, []);
         assert_eq!(kb.current_text, "");
     }
 

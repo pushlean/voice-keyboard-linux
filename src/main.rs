@@ -711,29 +711,34 @@ where
                                         Ok(text) => {
                                             info!("Received transcription: {}", text);
                                             
-                                            // First, send an Update event with the transcript
-                                            let update_result = stt_client::TranscriptionResult {
-                                                event: "Update".to_string(),
-                                                turn_index: 0,
-                                                start: 0.0,
-                                                timestamp: 0.0,
-                                                transcript: text.clone(),
-                                                words: Vec::new(),
-                                                end_of_turn_confidence: 1.0,
-                                            };
-                                            on_transcription_clone(update_result);
-                                            
-                                            // Then, send an EndOfTurn event to finalize
-                                            let eot_result = stt_client::TranscriptionResult {
-                                                event: "EndOfTurn".to_string(),
-                                                turn_index: 0,
-                                                start: 0.0,
-                                                timestamp: 0.0,
-                                                transcript: String::new(),
-                                                words: Vec::new(),
-                                                end_of_turn_confidence: 1.0,
-                                            };
-                                            on_transcription_clone(eot_result);
+                                            // Only send transcription events if the text is not empty
+                                            if !text.is_empty() {
+                                                // First, send an Update event with the transcript
+                                                let update_result = stt_client::TranscriptionResult {
+                                                    event: "Update".to_string(),
+                                                    turn_index: 0,
+                                                    start: 0.0,
+                                                    timestamp: 0.0,
+                                                    transcript: text.clone(),
+                                                    words: Vec::new(),
+                                                    end_of_turn_confidence: 1.0,
+                                                };
+                                                on_transcription_clone(update_result);
+                                                
+                                                // Then, send an EndOfTurn event to finalize
+                                                let eot_result = stt_client::TranscriptionResult {
+                                                    event: "EndOfTurn".to_string(),
+                                                    turn_index: 0,
+                                                    start: 0.0,
+                                                    timestamp: 0.0,
+                                                    transcript: String::new(),
+                                                    words: Vec::new(),
+                                                    end_of_turn_confidence: 1.0,
+                                                };
+                                                on_transcription_clone(eot_result);
+                                            } else {
+                                                info!("Transcription is empty, skipping keyboard input");
+                                            }
                                         }
                                         Err(e) => {
                                             error!("Failed to transcribe audio: {}", e);

@@ -80,8 +80,11 @@ impl WhisperClient {
         let whisper_response: WhisperResponse = response.json().await
             .context("Failed to parse Whisper API response")?;
 
-        info!("Received transcription from Whisper API: {}", whisper_response.text);
-        Ok(whisper_response.text)
+        // Trim whitespace from the transcription
+        let trimmed_text = whisper_response.text.trim().to_string();
+        
+        info!("Received transcription from Whisper API: {}", trimmed_text);
+        Ok(trimmed_text)
     }
 
     /// Convert PCM 16-bit audio data to WAV format
