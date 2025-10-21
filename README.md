@@ -15,6 +15,7 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 - **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections (WebSocket mode)
 - **Toggle Control**: Enable/disable listening with keyboard shortcut (via D-Bus) or system tray icon
 - **Auto-Toggle Off**: Automatically deactivates after a configurable period of silence (default: 30 seconds)
+- **Media Pause/Resume**: Automatically pauses playing media when recording starts and resumes when finished
 - **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
 - **D-Bus Integration**: Control via D-Bus for GNOME Wayland and other desktop environments
 - **Audio Recording**: Save audio input to WAV files for debugging and analysis
@@ -138,6 +139,22 @@ The application includes an automatic toggle-off feature to conserve resources w
 
 This feature helps ensure the microphone isn't left on indefinitely, improving both privacy and system resource usage.
 
+### Media Pause/Resume
+
+The application automatically manages media playback to prevent interference with voice input:
+
+- **When toggling ON**: Automatically pauses any playing media (music, videos, etc.)
+- **When toggling OFF**: Resumes only the media that was paused by the app
+- **Multi-player support**: Handles multiple media players simultaneously
+- **Smart tracking**: Won't resume media that was already paused before recording started
+
+**How it works**:
+- Uses the MPRIS (Media Player Remote Interfacing Specification) DBus interface
+- Works with most Linux media players: Spotify, VLC, Firefox, Chrome, MPV, and more
+- No external dependencies required - uses native DBus communication
+
+This feature ensures clear audio input without background noise from media playback, and seamlessly resumes your media when you're done.
+
 ## Speech-to-Text Service
 
 This application supports two STT modes:
@@ -229,9 +246,11 @@ Both options will record for 5 seconds and save the audio in 32-bit float WAV fo
 2. **Virtual Keyboard**: Creates `/dev/uinput` device as root
 3. **Privilege Drop**: Drops to original user privileges
 4. **Audio Access**: Accesses PipeWire/PulseAudio in user space
-5. **Speech Recognition**: Streams audio to **Deepgram Flux** STT service
-6. **Incremental Typing**: Updates text in real-time with smart backspacing
-7. **Turn Finalization**: Clears tracking on "EndOfTurn" events (user presses Enter manually)
+5. **Toggle ON**: Pauses any playing media via MPRIS DBus interface
+6. **Speech Recognition**: Streams audio to **Deepgram Flux** STT service
+7. **Incremental Typing**: Updates text in real-time with smart backspacing
+8. **Turn Finalization**: Clears tracking on "EndOfTurn" events (user presses Enter manually)
+9. **Toggle OFF**: Resumes previously paused media automatically
 
 ### Transcript Handling
 
@@ -305,6 +324,7 @@ src/
 ├── main.rs              # Main application and privilege dropping
 ├── virtual_keyboard.rs  # Virtual keyboard device management
 ├── audio_input.rs       # Audio capture and processing
+├── audio_control.rs     # Media player pause/resume via MPRIS
 ├── stt_client.rs        # WebSocket STT client (Deepgram)
 ├── whisper_client.rs    # REST STT client (OpenAI Whisper)
 ├── tray_icon.rs         # System tray icon management
@@ -317,6 +337,7 @@ src/
 - **OriginalUser**: Captures and restores user context
 - **VirtualKeyboard**: Manages uinput device lifecycle with smart transcript updates
 - **AudioInput**: Cross-platform audio capture with optional WAV file recording
+- **AudioControl**: Media player pause/resume management via MPRIS DBus interface
 - **SttClient**: WebSocket-based speech-to-text client (Deepgram Flux)
 - **WhisperClient**: REST-based speech-to-text client (OpenAI Whisper)
 - **AudioBuffer**: Manages audio chunking for STT streaming

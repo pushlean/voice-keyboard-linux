@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info};
 
+mod audio_control;
 mod audio_input;
 mod dbus_service;
 mod input_event;
@@ -18,6 +19,7 @@ mod tray_icon;
 mod virtual_keyboard;
 mod whisper_client;
 
+use audio_control::AudioControl;
 use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
 use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
@@ -521,9 +523,17 @@ where
         // Track current active session
         let mut active_session: Option<ActiveSttSession> = None;
         
+        // Create audio control instance to manage system audio pause/resume
+        let mut audio_control = AudioControl::new();
+        
         for command in cmd_rx {
             match command {
                 SttCommand::Start => {
+                    // Pause system audio if playing
+                    if let Err(e) = audio_control.on_recording_start() {
+                        error!("Failed to control system audio: {}", e);
+                    }
+                    
                     // If there's an existing session, close it first
                     if let Some(session) = active_session.take() {
                         info!("Closing existing STT session...");
@@ -655,6 +665,11 @@ where
                     }
                 }
                 SttCommand::Stop => {
+                    // Resume system audio if we paused it
+                    if let Err(e) = audio_control.on_recording_stop() {
+                        error!("Failed to control system audio: {}", e);
+                    }
+                    
                     // Close session: this will drop the WebSocket connection and stop audio recording
                     if let Some(session) = active_session.take() {
                         info!("Stopping STT session...");

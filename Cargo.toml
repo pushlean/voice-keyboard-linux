@@ -24,6 +24,7 @@ gtk = "0.18"
 zbus = { version = "4.0", default-features = false, features = ["tokio"] }
 hound = "3.5"
 reqwest = { version = "0.11", features = ["multipart", "blocking", "json"] }
+mpris = "2.0"
 
 [profile.release]
 lto = true
