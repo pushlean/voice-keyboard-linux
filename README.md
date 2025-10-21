@@ -8,9 +8,11 @@ As a result of directly targeting Linux as a driver, this works with all Linux a
 
 ## Features
 
-- **Voice-to-Text**: Real-time speech recognition using Deepgram's **Flux** API service (turn-taking STT)
+- **Voice-to-Text**: Speech recognition using either:
+  - **Deepgram Flux** (WebSocket mode) - Real-time streaming with turn-taking STT
+  - **OpenAI Whisper** (REST mode) - Record and transcribe complete utterances
 - **Virtual Keyboard**: Creates a virtual input device that works with all applications
-- **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections
+- **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections (WebSocket mode)
 - **Toggle Control**: Enable/disable listening with keyboard shortcut (via D-Bus) or system tray icon
 - **Auto-Toggle Off**: Automatically deactivates after a configurable period of silence (default: 30 seconds)
 - **System Tray Icon**: Visual indicator showing active (green) or inactive (red) state
@@ -48,9 +50,11 @@ cd voice-keyboard
 cargo build
 ```
 
-### Acquire a Deepgram API key
+### Acquire an API key
 
-You’ll need a Deepgram API key to authenticate with Flux.
+#### For Deepgram (WebSocket mode - default)
+
+You'll need a Deepgram API key to authenticate with Flux.
 
 - Create or manage keys in the Deepgram console: [Create additional API keys](https://developers.deepgram.com/docs/create-additional-api-keys)
 - Export the key so the app can pick it up (recommended):
@@ -58,8 +62,19 @@ You’ll need a Deepgram API key to authenticate with Flux.
   export DEEPGRAM_API_KEY="dg_your_api_key_here"
   ```
 - The client sends the header `Authorization: Token <DEEPGRAM_API_KEY>`.
-- For CI or systemd services, set `DEEPGRAM_API_KEY` in the environment for the service user.
-- Security tip: treat API keys like passwords. Prefer env vars over committing keys to files.
+
+#### For OpenAI Whisper (REST mode)
+
+You'll need an OpenAI API key to use the Whisper API.
+
+- Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+- Export the key:
+  ```bash
+  export OPENAI_API_KEY="sk-your_api_key_here"
+  ```
+- Use the `--stt-provider rest` flag to enable REST mode
+
+**Security tip**: Treat API keys like passwords. Prefer env vars over committing keys to files.
 
 ## Usage
 
@@ -125,7 +140,29 @@ This feature helps ensure the microphone isn't left on indefinitely, improving b
 
 ## Speech-to-Text Service
 
-This application uses **Deepgram Flux**, the company's new turn‑taking STT API. The default WebSocket URL is `wss://api.deepgram.com/v2/listen`.
+This application supports two STT modes:
+
+### WebSocket Mode (Default) - Deepgram Flux
+
+Uses **Deepgram Flux**, the company's new turn‑taking STT API for real-time streaming transcription.
+
+- **URL**: `wss://api.deepgram.com/v2/listen`
+- **Behavior**: Streams audio continuously, receives incremental transcription updates
+- **Best for**: Real-time typing as you speak, conversational interfaces
+- **Command**: `sudo -E ./target/debug/voice-keyboard --stt-provider websocket`
+
+### REST Mode - OpenAI Whisper
+
+Uses **OpenAI Whisper API** for batch transcription of complete recordings.
+
+- **URL**: `https://api.openai.com/v1/audio/transcriptions`
+- **Behavior**: Records entire utterance when listening is active, sends complete audio when toggled off
+- **Best for**: Dictation, complete sentences or paragraphs, potentially better accuracy for longer utterances
+- **Command**: `sudo -E ./target/debug/voice-keyboard --stt-provider rest`
+
+**Key Difference**: 
+- WebSocket mode types text in real-time as you speak
+- REST mode buffers your speech and types it all at once when you toggle off
 
 ## Command Line Options
 
@@ -136,17 +173,41 @@ OPTIONS:
     --test-audio                    Test audio input and show levels
     --test-stt                      Test speech-to-text functionality (default if no other mode specified)
     --debug-stt                     Debug speech-to-text (print transcripts without typing)
-    --stt-url <URL>                 Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
+    --stt-provider <PROVIDER>       STT provider: 'websocket' (Deepgram) or 'rest' (OpenAI Whisper)
+                                    (default: websocket)
+    --stt-url <URL>                 Custom STT service URL 
+                                    (WebSocket default: wss://api.deepgram.com/v2/listen)
+                                    (REST default: https://api.openai.com/v1/audio/transcriptions)
     --save-audio <FILE_PATH>        Save audio to a WAV file (works with --test-audio)
-    --live-mode                     Type text immediately as it's transcribed (default: wait until end of turn)
-    --eager-eot-threshold <N>       Eager end-of-turn threshold (0.3-0.9, omit to disable)
-    --eot-threshold <N>             Standard end-of-turn threshold (0.5-0.9, default: 0.8)
+    --live-mode                     Type text immediately as it's transcribed 
+                                    (default: wait until end of turn, WebSocket mode only)
+    --eager-eot-threshold <N>       Eager end-of-turn threshold (0.3-0.9, omit to disable, WebSocket mode only)
+    --eot-threshold <N>             Standard end-of-turn threshold (0.5-0.9, default: 0.8, WebSocket mode only)
     --inactivity-timeout <SECONDS>  Auto-toggle off after this many seconds of silence (default: 30)
     -h, --help                      Print help information
     -V, --version                   Print version information
 ```
 
 **Note**: If no mode is specified, the application defaults to `--test-stt` behavior.
+
+### Usage Examples
+
+**WebSocket mode (Deepgram Flux):**
+```bash
+export DEEPGRAM_API_KEY="your_key_here"
+sudo -E ./target/debug/voice-keyboard --stt-provider websocket
+```
+
+**REST mode (OpenAI Whisper):**
+```bash
+export OPENAI_API_KEY="your_key_here"
+sudo -E ./target/debug/voice-keyboard --stt-provider rest
+```
+
+**Debug mode to see transcriptions without typing:**
+```bash
+sudo -E ./target/debug/voice-keyboard --stt-provider rest --debug-stt
+```
 
 ### Audio Recording Examples
 
@@ -244,7 +305,8 @@ src/
 ├── main.rs              # Main application and privilege dropping
 ├── virtual_keyboard.rs  # Virtual keyboard device management
 ├── audio_input.rs       # Audio capture and processing
-├── stt_client.rs        # WebSocket STT client
+├── stt_client.rs        # WebSocket STT client (Deepgram)
+├── whisper_client.rs    # REST STT client (OpenAI Whisper)
 ├── tray_icon.rs         # System tray icon management
 ├── dbus_service.rs      # D-Bus interface for external control
 └── input_event.rs       # Linux input event constants
@@ -255,7 +317,8 @@ src/
 - **OriginalUser**: Captures and restores user context
 - **VirtualKeyboard**: Manages uinput device lifecycle with smart transcript updates
 - **AudioInput**: Cross-platform audio capture with optional WAV file recording
-- **SttClient**: WebSocket-based speech-to-text client
+- **SttClient**: WebSocket-based speech-to-text client (Deepgram Flux)
+- **WhisperClient**: REST-based speech-to-text client (OpenAI Whisper)
 - **AudioBuffer**: Manages audio chunking for STT streaming
 - **DbusService**: D-Bus interface for external control and desktop integration
 - **TrayManager**: System tray icon with state visualization

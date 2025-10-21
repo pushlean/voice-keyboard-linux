@@ -16,10 +16,18 @@ mod input_event;
 mod stt_client;
 mod tray_icon;
 mod virtual_keyboard;
+mod whisper_client;
 
 use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
 use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
+use whisper_client::WhisperClient;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SttProvider {
+    WebSocket,  // Deepgram or similar WebSocket-based STT
+    Rest,       // OpenAI Whisper or similar REST-based STT
+}
 
 #[derive(Debug)]
 struct OriginalUser {
@@ -137,6 +145,13 @@ async fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("stt-provider")
+                .long("stt-provider")
+                .help("STT provider type: 'websocket' (Deepgram) or 'rest' (OpenAI Whisper)")
+                .value_name("PROVIDER")
+                .default_value("websocket"),
+        )
+        .arg(
             Arg::new("stt-url")
                 .long("stt-url")
                 .help("Custom STT service URL")
@@ -215,6 +230,17 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(30);
 
+    // Parse STT provider
+    let stt_provider = match matches.get_one::<String>("stt-provider").map(|s| s.as_str()) {
+        Some("websocket") => SttProvider::WebSocket,
+        Some("rest") => SttProvider::Rest,
+        Some(provider) => {
+            error!("Invalid STT provider: {}. Must be 'websocket' or 'rest'", provider);
+            std::process::exit(1);
+        }
+        None => SttProvider::WebSocket, // Default
+    };
+
     let device_name = "Voice Keyboard";
     let delay_input = !matches.get_flag("live-mode");
 
@@ -234,22 +260,16 @@ async fn main() -> Result<()> {
         let save_audio_path = matches.get_one::<String>("save-audio").map(|s| s.as_str());
         test_audio(save_audio_path).await?;
     } else if matches.get_flag("test-stt") {
-        let stt_url = matches
-            .get_one::<String>("stt-url")
-            .map(|s| s.as_str())
-            .unwrap_or(stt_client::STT_URL);
-        test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
+        let stt_url = matches.get_one::<String>("stt-url");
+        test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
     } else {
         let debug_mode = matches.get_flag("debug-stt");
-        let stt_url = matches
-            .get_one::<String>("stt-url")
-            .map(|s| s.as_str())
-            .unwrap_or(stt_client::STT_URL);
+        let stt_url = matches.get_one::<String>("stt-url");
 
         if debug_mode {
-            debug_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
+            debug_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
         } else {
-            test_stt(keyboard, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
+            test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout).await?;
         }
     }
 
@@ -308,14 +328,14 @@ async fn test_audio(save_audio_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
+async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
     info!("Testing speech-to-text functionality...");
 
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
 
-    run_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, move |result| {
+    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, move |result| {
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
         }
@@ -358,11 +378,10 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
     .await
 }
 
-async fn debug_stt(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
+async fn debug_stt(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64) -> Result<()> {
     info!("Debugging speech-to-text functionality...");
-    info!("STT Service URL: {}", stt_url);
 
-    run_stt(stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, |result| {
+    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, |result| {
         // Only show non-empty transcriptions
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
@@ -377,12 +396,13 @@ enum SttCommand {
 }
 
 struct ActiveSttSession {
-    audio_tx: tokio_mpsc::Sender<Vec<u8>>,
-    _handle: tokio::task::JoinHandle<Result<()>>, // Kept alive to maintain the async task
+    audio_tx: Option<tokio_mpsc::Sender<Vec<u8>>>, // For WebSocket mode
+    _handle: Option<tokio::task::JoinHandle<Result<()>>>, // Kept alive to maintain the async task (WebSocket only)
     _audio_input: AudioInput, // Kept alive to maintain audio stream
+    audio_buffer: Option<Arc<Mutex<Vec<u8>>>>, // For REST mode - buffer all audio data
 }
 
-async fn run_stt<F>(stt_url: &str, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, on_transcription: F) -> Result<()>
+async fn run_stt<F>(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static + Clone,
 {
@@ -401,16 +421,28 @@ where
     drop(temp_audio);
 
     info!("Voice Keyboard is ready!");
+    info!("STT Provider: {}", match stt_provider {
+        SttProvider::WebSocket => "WebSocket (Deepgram)",
+        SttProvider::Rest => "REST (OpenAI Whisper)",
+    });
+    if let Some(url) = stt_url {
+        info!("STT URL: {}", url);
+    }
     info!("Use the tray icon or D-Bus to toggle listening.");
     info!("Press Ctrl+C to quit.");
-    if let Some(threshold) = eager_eot_threshold {
-        info!("Eager end-of-turn threshold: {}", threshold);
-    } else {
-        info!("Eager end-of-turn: disabled");
+    
+    // Only show EOT thresholds for WebSocket mode
+    if stt_provider == SttProvider::WebSocket {
+        if let Some(threshold) = eager_eot_threshold {
+            info!("Eager end-of-turn threshold: {}", threshold);
+        } else {
+            info!("Eager end-of-turn: disabled");
+        }
+        if let Some(threshold) = eot_threshold {
+            info!("Standard end-of-turn threshold: {}", threshold);
+        }
     }
-    if let Some(threshold) = eot_threshold {
-        info!("Standard end-of-turn threshold: {}", threshold);
-    }
+    
     info!("Auto-toggle off after {} seconds of inactivity", inactivity_timeout);
 
     // Shared state for STT active/inactive
@@ -467,7 +499,7 @@ where
     });
     
     // Clone necessary values for the STT thread
-    let stt_url = stt_url.to_string();
+    let stt_url_owned = stt_url.map(|s| s.clone());
     let last_activity_clone = last_activity.clone();
     let last_activity_reset = last_activity.clone();
     
@@ -495,7 +527,9 @@ where
                     // If there's an existing session, close it first
                     if let Some(session) = active_session.take() {
                         info!("Closing existing STT session...");
-                        drop(session.audio_tx); // This will trigger WebSocket cleanup
+                        if let Some(tx) = session.audio_tx {
+                            drop(tx); // This will trigger WebSocket cleanup
+                        }
                         drop(session._audio_input); // Stop audio recording
                         // Don't wait for handle to finish, just move on
                     }
@@ -503,28 +537,79 @@ where
                     // Reset inactivity timer when starting a new session
                     *last_activity_reset.lock() = std::time::Instant::now();
                     
-                    // Create new STT connection
-                    info!("Creating new STT connection...");
-                    let stt_client = SttClient::with_eot_thresholds(&stt_url, sample_rate, eager_eot_threshold, eot_threshold);
-                    let on_transcription_clone = wrapped_on_transcription.clone();
+                    // Create audio input on this thread
+                    let mut audio_input = match AudioInput::new() {
+                        Ok(ai) => ai,
+                        Err(e) => {
+                            error!("Failed to create audio input: {}", e);
+                            continue;
+                        }
+                    };
                     
-                    match rt.block_on(stt_client.connect_and_transcribe(on_transcription_clone)) {
-                        Ok((audio_tx, handle)) => {
-                            info!("STT connection established");
+                    match stt_provider {
+                        SttProvider::WebSocket => {
+                            // WebSocket mode: stream audio chunks continuously
+                            info!("Creating new WebSocket STT connection...");
+                            let url = stt_url_owned.as_ref().map(|s| s.as_str()).unwrap_or(stt_client::STT_URL);
+                            let stt_client = SttClient::with_eot_thresholds(url, sample_rate, eager_eot_threshold, eot_threshold);
+                            let on_transcription_clone = wrapped_on_transcription.clone();
                             
-                            // Create audio input on this thread
-                            let mut audio_input = match AudioInput::new() {
-                                Ok(ai) => ai,
-                                Err(e) => {
-                                    error!("Failed to create audio input: {}", e);
-                                    continue;
+                            match rt.block_on(stt_client.connect_and_transcribe(on_transcription_clone)) {
+                                Ok((audio_tx, handle)) => {
+                                    info!("STT connection established");
+                                    
+                                    // Start recording
+                                    info!("Starting audio recording...");
+                                    let audio_tx_clone = audio_tx.clone();
+                                    let audio_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate, 160)));
+                                    
+                                    if let Err(e) = audio_input.start_recording(move |data| {
+                                        debug!("Received audio data: {} samples", data.len());
+
+                                        // Average stereo channels to mono
+                                        let mono_data: Vec<f32> = if channels == 2 {
+                                            let mut mono = Vec::with_capacity(data.len() / 2);
+                                            for chunk in data.chunks_exact(2) {
+                                                mono.push((chunk[0] + chunk[1]) / 2.0);
+                                            }
+                                            debug!("Averaged samples: {}", mono.len());
+                                            mono
+                                        } else {
+                                            data.to_vec()
+                                        };
+
+                                        // Create audio chunks and send them
+                                        let mut buffer = audio_buffer.lock();
+                                        let chunks = buffer.add_samples(&mono_data);
+                                        for chunk in chunks {
+                                            debug!("Sending audio chunk: {} bytes", chunk.len());
+                                            if let Err(e) = audio_tx_clone.blocking_send(chunk) {
+                                                error!("Failed to send audio chunk: {}", e);
+                                            }
+                                        }
+                                    }) {
+                                        error!("Failed to start recording: {}", e);
+                                        continue;
+                                    }
+                                    
+                                    // Store the complete session (connection + audio input)
+                                    active_session = Some(ActiveSttSession {
+                                        audio_tx: Some(audio_tx),
+                                        _handle: Some(handle),
+                                        _audio_input: audio_input,
+                                        audio_buffer: None,
+                                    });
                                 }
-                            };
-                            
-                            // Start recording
-                            info!("Starting audio recording...");
-                            let audio_tx_clone = audio_tx.clone();
-                            let audio_buffer = Arc::new(Mutex::new(AudioBuffer::new(sample_rate, 160)));
+                                Err(e) => {
+                                    error!("Failed to create STT connection: {}", e);
+                                }
+                            }
+                        }
+                        SttProvider::Rest => {
+                            // REST mode: buffer all audio data
+                            info!("Starting REST mode audio recording...");
+                            let buffer = Arc::new(Mutex::new(Vec::new()));
+                            let buffer_clone = buffer.clone();
                             
                             if let Err(e) = audio_input.start_recording(move |data| {
                                 debug!("Received audio data: {} samples", data.len());
@@ -541,29 +626,31 @@ where
                                     data.to_vec()
                                 };
 
-                                // Create audio chunks and send them
-                                let mut buffer = audio_buffer.lock();
-                                let chunks = buffer.add_samples(&mono_data);
-                                for chunk in chunks {
-                                    debug!("Sending audio chunk: {} bytes", chunk.len());
-                                    if let Err(e) = audio_tx_clone.blocking_send(chunk) {
-                                        error!("Failed to send audio chunk: {}", e);
-                                    }
-                                }
+                                // Convert to PCM 16-bit and buffer
+                                let pcm_data: Vec<u8> = mono_data
+                                    .iter()
+                                    .flat_map(|&sample| {
+                                        let pcm_sample = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                                        pcm_sample.to_le_bytes()
+                                    })
+                                    .collect();
+
+                                // Append to buffer
+                                buffer_clone.lock().extend_from_slice(&pcm_data);
                             }) {
                                 error!("Failed to start recording: {}", e);
                                 continue;
                             }
                             
-                            // Store the complete session (connection + audio input)
+                            info!("Audio recording started (REST mode - buffering)");
+                            
+                            // Store the session with buffer
                             active_session = Some(ActiveSttSession {
-                                audio_tx,
-                                _handle: handle,
+                                audio_tx: None,
+                                _handle: None,
                                 _audio_input: audio_input,
+                                audio_buffer: Some(buffer),
                             });
-                        }
-                        Err(e) => {
-                            error!("Failed to create STT connection: {}", e);
                         }
                     }
                 }
@@ -571,7 +658,68 @@ where
                     // Close session: this will drop the WebSocket connection and stop audio recording
                     if let Some(session) = active_session.take() {
                         info!("Stopping STT session...");
-                        drop(session); // Drops audio_tx (closes WebSocket) and _audio_input (stops recording)
+                        
+                        match stt_provider {
+                            SttProvider::WebSocket => {
+                                // WebSocket mode: just drop the session to clean up
+                                drop(session);
+                            }
+                            SttProvider::Rest => {
+                                // REST mode: send buffered audio to Whisper API
+                                if let Some(buffer) = session.audio_buffer {
+                                    // Stop recording first
+                                    drop(session._audio_input);
+                                    
+                                    let audio_data = buffer.lock().clone();
+                                    info!("Sending {} bytes of audio to Whisper API...", audio_data.len());
+                                    
+                                    if audio_data.is_empty() {
+                                        info!("No audio data recorded, skipping transcription");
+                                        continue;
+                                    }
+                                    
+                                    // Create Whisper client and send audio
+                                    let url = stt_url_owned.as_ref().map(|s| s.as_str());
+                                    let whisper_client = WhisperClient::new(url);
+                                    let on_transcription_clone = wrapped_on_transcription.clone();
+                                    
+                                    match rt.block_on(whisper_client.transcribe(&audio_data, sample_rate)) {
+                                        Ok(text) => {
+                                            info!("Received transcription: {}", text);
+                                            
+                                            // First, send an Update event with the transcript
+                                            let update_result = stt_client::TranscriptionResult {
+                                                event: "Update".to_string(),
+                                                turn_index: 0,
+                                                start: 0.0,
+                                                timestamp: 0.0,
+                                                transcript: text.clone(),
+                                                words: Vec::new(),
+                                                end_of_turn_confidence: 1.0,
+                                            };
+                                            on_transcription_clone(update_result);
+                                            
+                                            // Then, send an EndOfTurn event to finalize
+                                            let eot_result = stt_client::TranscriptionResult {
+                                                event: "EndOfTurn".to_string(),
+                                                turn_index: 0,
+                                                start: 0.0,
+                                                timestamp: 0.0,
+                                                transcript: String::new(),
+                                                words: Vec::new(),
+                                                end_of_turn_confidence: 1.0,
+                                            };
+                                            on_transcription_clone(eot_result);
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to transcribe audio: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    drop(session);
+                                }
+                            }
+                        }
                     }
                 }
             }
