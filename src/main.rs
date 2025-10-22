@@ -444,9 +444,10 @@ where
         if let Some(threshold) = eot_threshold {
             info!("Standard end-of-turn threshold: {}", threshold);
         }
+        info!("Auto-toggle off after {} seconds of inactivity", inactivity_timeout);
+    } else {
+        info!("REST mode: Manually toggle off when done (10 minute maximum to prevent memory overflow)");
     }
-    
-    info!("Auto-toggle off after {} seconds of inactivity", inactivity_timeout);
 
     // Shared state for STT active/inactive
     let is_active = Arc::new(Mutex::new(false));
@@ -480,23 +481,38 @@ where
         let _ = cmd_tx_cancel.send(SttCommand::Cancel);
     });
     
-    // Spawn inactivity monitor thread
-    let cmd_tx_inactivity = cmd_tx.clone();
+    // Spawn timeout monitor thread
+    let cmd_tx_timeout = cmd_tx.clone();
     let last_activity_monitor = last_activity.clone();
     let is_active_monitor = is_active.clone();
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_secs(1));
             
-            // Only check inactivity if we're currently active
             if *is_active_monitor.lock() {
                 let elapsed = last_activity_monitor.lock().elapsed();
-                if elapsed >= Duration::from_secs(inactivity_timeout) {
-                    info!("Inactivity timeout reached ({} seconds), auto-toggling off", inactivity_timeout);
-                    // Update is_active state first to prevent repeated logs and update tray icon
-                    *is_active_monitor.lock() = false;
-                    // Send stop command to STT thread
-                    let _ = cmd_tx_inactivity.send(SttCommand::Stop);
+                
+                match stt_provider {
+                    SttProvider::WebSocket => {
+                        // Streaming mode: auto-toggle based on inactivity
+                        if elapsed >= Duration::from_secs(inactivity_timeout) {
+                            info!("Inactivity timeout reached ({} seconds), auto-toggling off", inactivity_timeout);
+                            // Update is_active state first to prevent repeated logs and update tray icon
+                            *is_active_monitor.lock() = false;
+                            // Send stop command to STT thread
+                            let _ = cmd_tx_timeout.send(SttCommand::Stop);
+                        }
+                    }
+                    SttProvider::Rest => {
+                        // REST mode: maximum recording time to prevent memory overflow
+                        const MAX_RECORDING_TIME_SECS: u64 = 600; // 10 minutes
+                        if elapsed >= Duration::from_secs(MAX_RECORDING_TIME_SECS) {
+                            info!("Maximum recording time reached ({} minutes), auto-toggling off to prevent memory overflow", MAX_RECORDING_TIME_SECS / 60);
+                            // Update is_active state first to prevent repeated logs and update tray icon
+                            *is_active_monitor.lock() = false;
+                            let _ = cmd_tx_timeout.send(SttCommand::Cancel);
+                        }
+                    }
                 }
             }
         }
