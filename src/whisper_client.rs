@@ -14,10 +14,11 @@ pub struct WhisperResponse {
 pub struct WhisperClient {
     api_url: String,
     api_key: Option<String>,
+    language: String,
 }
 
 impl WhisperClient {
-    pub fn new(api_url: Option<&str>) -> Self {
+    pub fn new(api_url: Option<&str>, language: &str) -> Self {
         let api_key = env::var("OPENAI_API_KEY").ok();
         
         if api_key.is_none() {
@@ -27,6 +28,7 @@ impl WhisperClient {
         Self {
             api_url: api_url.unwrap_or(WHISPER_API_URL).to_string(),
             api_key,
+            language: language.to_string(),
         }
     }
 
@@ -48,7 +50,8 @@ impl WhisperClient {
 
         let form = multipart::Form::new()
             .part("file", part)
-            .text("model", "whisper-1");
+            .text("model", "whisper-1")
+            .text("language", self.language.clone());
 
         // Send request
         info!("Sending audio to OpenAI Whisper API...");
