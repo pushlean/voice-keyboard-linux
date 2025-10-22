@@ -41,10 +41,6 @@ impl WhisperClient {
         
         debug!("Converted to WAV format: {} bytes", wav_data.len());
 
-        // Get API key
-        let api_key = self.api_key.as_ref()
-            .context("OPENAI_API_KEY environment variable is not set")?;
-
         // Build multipart form
         let part = multipart::Part::bytes(wav_data)
             .file_name("audio.wav")
@@ -57,10 +53,16 @@ impl WhisperClient {
         // Send request
         info!("Sending audio to OpenAI Whisper API...");
         let client = reqwest::Client::new();
-        let response = client
+        let mut request = client
             .post(&self.api_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .multipart(form)
+            .multipart(form);
+
+        // Only add Authorization header if API key is present
+        if let Some(api_key) = &self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to send request to Whisper API")?;
