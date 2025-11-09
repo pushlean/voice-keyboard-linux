@@ -925,7 +925,7 @@ mod tests {
         kb.finalize_transcript().unwrap();
 
         // Should not type anything (not even a space) when transcript is empty
-        assert_eq!(kb.hardware.typed_chars, []);
+        assert_eq!(kb.hardware.typed_chars, Vec::<char>::new());
         assert_eq!(kb.current_text, "");
     }
 

@@ -198,8 +198,18 @@ pub fn char_to_keycode(c: char) -> Option<(u16, bool)> {
         'x' | 'X' => Some((KEY_X, c.is_uppercase())),
         'y' | 'Y' => Some((KEY_Y, c.is_uppercase())),
         'z' | 'Z' => Some((KEY_Z, c.is_uppercase())),
-        // Numbers and special characters
-        '0'..='9' => Some((KEY_0 + (c as u16 - '0' as u16), false)),
+        // Numbers (note: KEY_1-KEY_9 come before KEY_0 in the keycodes)
+        '0' => Some((KEY_0, false)),
+        '1' => Some((KEY_1, false)),
+        '2' => Some((KEY_2, false)),
+        '3' => Some((KEY_3, false)),
+        '4' => Some((KEY_4, false)),
+        '5' => Some((KEY_5, false)),
+        '6' => Some((KEY_6, false)),
+        '7' => Some((KEY_7, false)),
+        '8' => Some((KEY_8, false)),
+        '9' => Some((KEY_9, false)),
+        // Other special characters
         ' ' => Some((KEY_SPACE, false)),
         '\n' => Some((KEY_ENTER, false)),
         '\t' => Some((KEY_TAB, false)),
