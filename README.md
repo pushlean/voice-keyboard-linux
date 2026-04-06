@@ -344,6 +344,15 @@ src/
 - **DbusService**: D-Bus interface for external control and desktop integration
 - **TrayManager**: System tray icon with state visualization
 
+### System Libraries
+```
+sudo apt install -y \
+  libasound2-dev \
+  libdbus-1-dev \
+  libgtk-3-dev \
+  libxdo-dev
+```
+
 ## License
 
 ISC License. See LICENSE.txt
