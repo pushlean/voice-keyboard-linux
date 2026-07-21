@@ -198,6 +198,13 @@ async fn main() -> Result<()> {
                 .value_name("LANGUAGE")
                 .default_value("en"),
         )
+        .arg(
+            Arg::new("stt-model")
+                .long("stt-model")
+                .help("STT model name for REST provider (default: whisper-1)")
+                .value_name("MODEL")
+                .default_value("whisper-1"),
+        )
         .get_matches();
 
     // Parse and validate thresholds from command line BEFORE creating keyboard
@@ -245,6 +252,11 @@ async fn main() -> Result<()> {
         .map(|s| s.as_str())
         .unwrap_or("en");
 
+    let stt_model = matches
+        .get_one::<String>("stt-model")
+        .map(|s| s.as_str())
+        .unwrap_or("whisper-1");
+
     // Parse STT provider
     let stt_provider = match matches.get_one::<String>("stt-provider").map(|s| s.as_str()) {
         Some("websocket") => SttProvider::WebSocket,
@@ -276,15 +288,15 @@ async fn main() -> Result<()> {
         test_audio(save_audio_path).await?;
     } else if matches.get_flag("test-stt") {
         let stt_url = matches.get_one::<String>("stt-url");
-        test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language).await?;
+        test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, stt_model).await?;
     } else {
         let debug_mode = matches.get_flag("debug-stt");
         let stt_url = matches.get_one::<String>("stt-url");
 
         if debug_mode {
-            debug_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language).await?;
+            debug_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, stt_model).await?;
         } else {
-            test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language).await?;
+            test_stt(keyboard, stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, stt_model).await?;
         }
     }
 
@@ -343,14 +355,14 @@ async fn test_audio(save_audio_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str) -> Result<()> {
+async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str, stt_model: &str) -> Result<()> {
     info!("Testing speech-to-text functionality...");
 
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
 
-    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, move |result| {
+    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, stt_model, move |result| {
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
         }
@@ -393,10 +405,10 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_provider:
     .await
 }
 
-async fn debug_stt(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str) -> Result<()> {
+async fn debug_stt(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str, stt_model: &str) -> Result<()> {
     info!("Debugging speech-to-text functionality...");
 
-    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, |result| {
+    run_stt(stt_provider, stt_url, eager_eot_threshold, eot_threshold, inactivity_timeout, language, stt_model, |result| {
         // Only show non-empty transcriptions
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
@@ -418,7 +430,7 @@ struct ActiveSttSession {
     audio_buffer: Option<Arc<Mutex<Vec<u8>>>>, // For REST mode - buffer all audio data
 }
 
-async fn run_stt<F>(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str, on_transcription: F) -> Result<()>
+async fn run_stt<F>(stt_provider: SttProvider, stt_url: Option<&String>, eager_eot_threshold: Option<f64>, eot_threshold: Option<f64>, inactivity_timeout: u64, language: &str, stt_model: &str, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static + Clone,
 {
@@ -541,6 +553,7 @@ where
     // Clone necessary values for the STT thread
     let stt_url_owned = stt_url.map(|s| s.clone());
     let language_owned = language.to_string();
+    let stt_model_owned = stt_model.to_string();
     let last_activity_clone = last_activity.clone();
     let last_activity_reset = last_activity.clone();
     
@@ -734,7 +747,7 @@ where
                                     
                                     // Create Whisper client and send audio
                                     let url = stt_url_owned.as_ref().map(|s| s.as_str());
-                                    let whisper_client = WhisperClient::new(url, &language_owned);
+                                    let whisper_client = WhisperClient::new(url, &language_owned, &stt_model_owned);
                                     let on_transcription_clone = wrapped_on_transcription.clone();
                                     
                                     match rt.block_on(whisper_client.transcribe(&audio_data, sample_rate)) {

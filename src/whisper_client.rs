@@ -15,12 +15,13 @@ pub struct WhisperClient {
     api_url: String,
     api_key: Option<String>,
     language: String,
+    model: String,
 }
 
 impl WhisperClient {
-    pub fn new(api_url: Option<&str>, language: &str) -> Self {
+    pub fn new(api_url: Option<&str>, language: &str, model: &str) -> Self {
         let api_key = env::var("OPENAI_API_KEY").ok();
-        
+
         if api_key.is_none() {
             debug!("OPENAI_API_KEY not set; API calls may fail");
         }
@@ -29,6 +30,7 @@ impl WhisperClient {
             api_url: api_url.unwrap_or(WHISPER_API_URL).to_string(),
             api_key,
             language: language.to_string(),
+            model: model.to_string(),
         }
     }
 
@@ -50,7 +52,7 @@ impl WhisperClient {
 
         let form = multipart::Form::new()
             .part("file", part)
-            .text("model", "whisper-1")
+            .text("model", self.model.clone())
             .text("language", self.language.clone());
 
         // Send request
