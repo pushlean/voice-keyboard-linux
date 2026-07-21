@@ -1,0 +1,25 @@
+[Unit]
+Description=vLLM API server running cohere-transcribe model
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/scratch/vllm/cohere-transcribe/.env
+WorkingDirectory=%h/scratch/vllm/cohere-transcribe
+
+ExecStart=%h/scratch/vllm/cohere-transcribe/.venv/bin/vllm serve \
+    CohereLabs/cohere-transcribe-03-2026 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.5
+
+StandardOutput=append:%h/.local/state/vllm/cohere-transcribe.log
+StandardError=append:%h/.local/state/vllm/cohere-transcribe.log
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=infinity
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
