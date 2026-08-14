@@ -24,10 +24,20 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# Run with sudo -E to preserve environment variables
+# Run as root long enough to create /dev/uinput, while explicitly passing the
+# desktop session variables needed after the program drops back to this user.
+# Some sudo policies ignore -E, so do not rely on it here.
 echo "Starting voice-keyboard with privilege dropping..."
 echo "Note: This will create a virtual keyboard as root, then drop privileges for audio access."
 echo ""
 
-sudo -E ./target/debug/voice-keyboard "$@"
-
+sudo /usr/bin/env \
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+  DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+  WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+  DISPLAY="$DISPLAY" \
+  PULSE_SERVER="${PULSE_SERVER:-}" \
+  PIPEWIRE_REMOTE="${PIPEWIRE_REMOTE:-}" \
+  HOME="$HOME" \
+  USER="$USER" \
+  ./target/debug/voice-keyboard "$@"
