@@ -10,8 +10,12 @@ WorkingDirectory=%h/scratch/vllm/cohere-transcribe
 
 ExecStart=%h/scratch/vllm/cohere-transcribe/.venv/bin/vllm serve \
     CohereLabs/cohere-transcribe-03-2026 \
+    --host 127.0.0.1 \
     --trust-remote-code \
     --kv-cache-memory-bytes 1G
+
+ExecStartPost=/usr/bin/tailscale serve --bg --https=443 http://127.0.0.1:8000
+ExecStopPost=/usr/bin/tailscale serve --https=443 off
 
 StandardOutput=append:%h/.local/state/vllm/cohere-transcribe.log
 StandardError=append:%h/.local/state/vllm/cohere-transcribe.log

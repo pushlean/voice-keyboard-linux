@@ -8,6 +8,7 @@ cd "$HOME/scratch/vllm/cohere-transcribe"
 if [[ ! -f .env ]]; then
     cat >.env <<'EOF'
 HF_TOKEN=
+VLLM_API_KEY=
 EOF
 fi
 
